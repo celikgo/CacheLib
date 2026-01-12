@@ -20,3 +20,13 @@ cachelib/external/gflags/
 cachelib/external/glog/
 cachelib/external/googletest/
 cachelib/external/sparsemap/
+
+# IDE files
+.idea/
+
+# Build logs
+*.log
+docker-build.log
+
+# Maven build artifacts
+**/target/
