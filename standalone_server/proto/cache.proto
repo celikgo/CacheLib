@@ -1,0 +1,186 @@
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package cachelib.grpc;
+
+option java_package = "com.facebook.cachelib.grpc";
+option java_outer_classname = "CacheProto";
+option java_multiple_files = true;
+
+// CacheService provides a Redis-like interface to CacheLib
+// allowing remote access to the cache over gRPC.
+service CacheService {
+  // Get retrieves a value from the cache by key.
+  // Returns empty value if key not found.
+  rpc Get(GetRequest) returns (GetResponse) {}
+
+  // Set stores a key-value pair in the cache with optional TTL.
+  rpc Set(SetRequest) returns (SetResponse) {}
+
+  // Delete removes a key from the cache.
+  rpc Delete(DeleteRequest) returns (DeleteResponse) {}
+
+  // MultiGet retrieves multiple values in a single call.
+  rpc MultiGet(MultiGetRequest) returns (MultiGetResponse) {}
+
+  // MultiSet stores multiple key-value pairs in a single call.
+  rpc MultiSet(MultiSetRequest) returns (MultiSetResponse) {}
+
+  // Exists checks if a key exists in the cache.
+  rpc Exists(ExistsRequest) returns (ExistsResponse) {}
+
+  // Stats returns cache statistics.
+  rpc Stats(StatsRequest) returns (StatsResponse) {}
+
+  // Ping checks if the server is alive.
+  rpc Ping(PingRequest) returns (PingResponse) {}
+}
+
+// GetRequest contains the key to retrieve.
+message GetRequest {
+  string key = 1;
+}
+
+// GetResponse contains the retrieved value.
+message GetResponse {
+  bool found = 1;
+  bytes value = 2;
+  // Remaining TTL in seconds (0 if no expiry set)
+  int64 ttl_remaining = 3;
+}
+
+// SetRequest contains the key-value pair to store.
+message SetRequest {
+  string key = 1;
+  bytes value = 2;
+  // TTL in seconds (0 means no expiration)
+  int64 ttl_seconds = 3;
+}
+
+// SetResponse indicates if the set operation succeeded.
+message SetResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// DeleteRequest contains the key to delete.
+message DeleteRequest {
+  string key = 1;
+}
+
+// DeleteResponse indicates if the delete operation succeeded.
+message DeleteResponse {
+  bool success = 1;
+  bool key_existed = 2;
+  string message = 3;
+}
+
+// MultiGetRequest contains multiple keys to retrieve.
+message MultiGetRequest {
+  repeated string keys = 1;
+}
+
+// KeyValue represents a single key-value pair in multi operations.
+message KeyValue {
+  string key = 1;
+  bytes value = 2;
+  bool found = 3;
+  int64 ttl_remaining = 4;
+}
+
+// MultiGetResponse contains multiple key-value results.
+message MultiGetResponse {
+  repeated KeyValue results = 1;
+}
+
+// MultiSetRequest contains multiple key-value pairs to store.
+message MultiSetRequest {
+  repeated SetRequest items = 1;
+}
+
+// MultiSetResponse indicates results of multi-set operation.
+message MultiSetResponse {
+  bool success = 1;
+  int32 succeeded_count = 2;
+  int32 failed_count = 3;
+  string message = 4;
+}
+
+// ExistsRequest checks for key existence.
+message ExistsRequest {
+  string key = 1;
+}
+
+// ExistsResponse indicates if the key exists.
+message ExistsResponse {
+  bool exists = 1;
+}
+
+// StatsRequest requests cache statistics.
+message StatsRequest {
+  // If true, include detailed per-pool stats
+  bool detailed = 1;
+}
+
+// PoolStats contains statistics for a single memory pool.
+message PoolStats {
+  string pool_name = 1;
+  int64 pool_size = 2;
+  int64 pool_used = 3;
+  int64 item_count = 4;
+  double hit_rate = 5;
+}
+
+// StatsResponse contains cache statistics.
+message StatsResponse {
+  // Total cache size in bytes
+  int64 total_size = 1;
+  // Used cache size in bytes
+  int64 used_size = 2;
+  // Number of items in cache
+  int64 item_count = 3;
+  // Cache hit rate (0.0 - 1.0)
+  double hit_rate = 4;
+  // Number of gets
+  int64 get_count = 5;
+  // Number of hits
+  int64 hit_count = 6;
+  // Number of misses
+  int64 miss_count = 7;
+  // Number of sets
+  int64 set_count = 8;
+  // Number of evictions
+  int64 eviction_count = 9;
+  // Flash/NVM cache enabled
+  bool nvm_enabled = 10;
+  // Flash/NVM cache size if enabled
+  int64 nvm_size = 11;
+  // Flash/NVM cache used if enabled
+  int64 nvm_used = 12;
+  // Per-pool statistics
+  repeated PoolStats pool_stats = 13;
+  // Server uptime in seconds
+  int64 uptime_seconds = 14;
+}
+
+// PingRequest is an empty request for health check.
+message PingRequest {}
+
+// PingResponse confirms server is alive.
+message PingResponse {
+  string message = 1;
+  int64 timestamp = 2;
+}

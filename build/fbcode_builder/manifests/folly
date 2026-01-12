@@ -45,7 +45,7 @@ openssl
 zlib
 
 [dependencies.os=linux]
-libaio
+# libaio removed to disable io_uring (requires newer kernel)
 libiberty
 libunwind
 
@@ -64,6 +64,9 @@ fbcode/folly = folly
 
 [cmake.defines]
 BUILD_SHARED_LIBS=OFF
+FOLLY_USE_IO_URING=OFF
+Liburing_FOUND=OFF
+LIBURING_FOUND=OFF
 
 [cmake.defines.not(os=windows)]
 BOOST_LINK_STATIC=ON
