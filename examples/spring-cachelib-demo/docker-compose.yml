@@ -1,0 +1,181 @@
+# =============================================================================
+# Spring Boot + CacheLib Demo - Docker Compose Configuration
+# =============================================================================
+#
+# This file defines a complete stack for running a Spring Boot application
+# with CacheLib as its caching backend, similar to how you would use Redis.
+#
+# Usage:
+#   docker-compose up -d        # Start all services
+#   docker-compose down         # Stop all services
+#   docker-compose logs -f      # View logs
+#   docker-compose ps           # Check status
+#
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # CacheLib gRPC Server
+  # ===========================================================================
+  # High-performance caching server from Meta/Facebook.
+  # Provides Redis-like functionality over gRPC protocol.
+  #
+  # Features:
+  #   - In-memory DRAM cache (configurable size)
+  #   - Optional NVM/SSD cache for larger datasets
+  #   - TTL support for automatic expiration
+  #   - High throughput and low latency
+  # ===========================================================================
+  cachelib:
+    image: cachelib-grpc-server:latest
+    container_name: cachelib
+
+    # -------------------------------------------------------------------------
+    # Server Configuration
+    # -------------------------------------------------------------------------
+    # Customize these arguments based on your needs:
+    #
+    #   --cache_size    : DRAM cache size in bytes
+    #                     Default: 1073741824 (1 GB)
+    #                     Examples: 536870912 (512 MB), 2147483648 (2 GB)
+    #
+    #   --enable_nvm    : Enable hybrid DRAM+SSD caching
+    #                     Set to true for datasets larger than RAM
+    #
+    #   --nvm_path      : Path to NVM cache file (requires volume mount)
+    #   --nvm_size      : NVM cache size in bytes
+    # -------------------------------------------------------------------------
+    command:
+      - "--address=0.0.0.0"
+      - "--port=50051"
+      - "--cache_size=1073741824"  # 1 GB DRAM cache
+      # Uncomment below to enable NVM (SSD) cache:
+      # - "--enable_nvm=true"
+      # - "--nvm_path=/data/nvm/cache"
+      # - "--nvm_size=10737418240"  # 10 GB SSD cache
+
+    # -------------------------------------------------------------------------
+    # Port Mapping
+    # -------------------------------------------------------------------------
+    # Expose gRPC port for client connections.
+    # Change the left side (host port) if 50051 is already in use.
+    # -------------------------------------------------------------------------
+    ports:
+      - "50051:50051"
+
+    # -------------------------------------------------------------------------
+    # Health Check
+    # -------------------------------------------------------------------------
+    # Ensures the container is running before dependent services start.
+    # -------------------------------------------------------------------------
+    healthcheck:
+      test: ["CMD-SHELL", "true"]  # Basic check - container is running
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+    # -------------------------------------------------------------------------
+    # Volume Mounts (Optional)
+    # -------------------------------------------------------------------------
+    # Uncomment to enable NVM cache persistence:
+    # volumes:
+    #   - nvm-data:/data/nvm
+
+    # -------------------------------------------------------------------------
+    # Resource Limits (Optional)
+    # -------------------------------------------------------------------------
+    # Uncomment to limit container resources:
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 2G
+    #       cpus: '2'
+
+    restart: unless-stopped
+
+  # ===========================================================================
+  # Spring Boot Application
+  # ===========================================================================
+  # Demo application that uses CacheLib for caching.
+  # Exposes REST API for user management with automatic caching.
+  #
+  # Endpoints:
+  #   GET  /api/users           - List all users
+  #   GET  /api/users/{id}      - Get user (cached)
+  #   POST /api/users           - Create user
+  #   PUT  /api/users/{id}      - Update user (invalidates cache)
+  #   DELETE /api/users/{id}    - Delete user (invalidates cache)
+  #   GET  /api/cache/stats     - Cache statistics
+  #   GET  /api/cache/health    - Cache health check
+  # ===========================================================================
+  spring-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spring-app
+
+    # -------------------------------------------------------------------------
+    # Port Mapping
+    # -------------------------------------------------------------------------
+    # Expose HTTP port for REST API.
+    # Access the API at http://localhost:8080
+    # -------------------------------------------------------------------------
+    ports:
+      - "8080:8080"
+
+    # -------------------------------------------------------------------------
+    # Environment Variables
+    # -------------------------------------------------------------------------
+    # Configure CacheLib connection.
+    # These are used by Spring Boot's application.yml
+    # -------------------------------------------------------------------------
+    environment:
+      # CacheLib server hostname (Docker service name)
+      - CACHELIB_HOST=cachelib
+      # CacheLib server port
+      - CACHELIB_PORT=50051
+      # Optional: Spring profiles
+      # - SPRING_PROFILES_ACTIVE=docker
+
+    # -------------------------------------------------------------------------
+    # Service Dependencies
+    # -------------------------------------------------------------------------
+    # Wait for CacheLib to be healthy before starting.
+    # -------------------------------------------------------------------------
+    depends_on:
+      cachelib:
+        condition: service_healthy
+
+    # -------------------------------------------------------------------------
+    # Health Check
+    # -------------------------------------------------------------------------
+    # Uses Spring Boot Actuator health endpoint.
+    # -------------------------------------------------------------------------
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+    restart: unless-stopped
+
+# =============================================================================
+# Networks
+# =============================================================================
+# Custom bridge network for service communication.
+# Services can reach each other using their service names (e.g., "cachelib").
+# =============================================================================
+networks:
+  default:
+    name: cachelib-network
+
+# =============================================================================
+# Volumes (Optional)
+# =============================================================================
+# Uncomment to enable persistent NVM cache storage.
+# =============================================================================
+# volumes:
+#   nvm-data:
+#     driver: local

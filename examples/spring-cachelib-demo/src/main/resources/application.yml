@@ -1,0 +1,25 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: spring-cachelib-demo
+
+# CacheLib configuration
+cachelib:
+  host: ${CACHELIB_HOST:localhost}
+  port: ${CACHELIB_PORT:50051}
+
+# Actuator endpoints
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.example.demo: DEBUG
