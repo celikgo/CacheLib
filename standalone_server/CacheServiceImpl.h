@@ -29,6 +29,10 @@ class CacheServiceImpl final : public cachelib::grpc::CacheService::Service {
  public:
   explicit CacheServiceImpl(std::shared_ptr<CacheManager> cacheManager);
 
+  // ---------------------------------------------------------------------------
+  // Basic Operations
+  // ---------------------------------------------------------------------------
+
   // Get retrieves a value from the cache by key
   ::grpc::Status Get(
       ::grpc::ServerContext* context,
@@ -47,6 +51,16 @@ class CacheServiceImpl final : public cachelib::grpc::CacheService::Service {
       const ::cachelib::grpc::DeleteRequest* request,
       ::cachelib::grpc::DeleteResponse* response) override;
 
+  // Exists checks if a key exists in the cache
+  ::grpc::Status Exists(
+      ::grpc::ServerContext* context,
+      const ::cachelib::grpc::ExistsRequest* request,
+      ::cachelib::grpc::ExistsResponse* response) override;
+
+  // ---------------------------------------------------------------------------
+  // Batch Operations
+  // ---------------------------------------------------------------------------
+
   // MultiGet retrieves multiple values in a single call
   ::grpc::Status MultiGet(
       ::grpc::ServerContext* context,
@@ -59,11 +73,63 @@ class CacheServiceImpl final : public cachelib::grpc::CacheService::Service {
       const ::cachelib::grpc::MultiSetRequest* request,
       ::cachelib::grpc::MultiSetResponse* response) override;
 
-  // Exists checks if a key exists in the cache
-  ::grpc::Status Exists(
+  // ---------------------------------------------------------------------------
+  // Atomic Operations
+  // ---------------------------------------------------------------------------
+
+  // SetNX sets a value only if the key doesn't exist
+  ::grpc::Status SetNX(
       ::grpc::ServerContext* context,
-      const ::cachelib::grpc::ExistsRequest* request,
-      ::cachelib::grpc::ExistsResponse* response) override;
+      const ::cachelib::grpc::SetNXRequest* request,
+      ::cachelib::grpc::SetNXResponse* response) override;
+
+  // Increment atomically increments a numeric value
+  ::grpc::Status Increment(
+      ::grpc::ServerContext* context,
+      const ::cachelib::grpc::IncrementRequest* request,
+      ::cachelib::grpc::IncrementResponse* response) override;
+
+  // Decrement atomically decrements a numeric value
+  ::grpc::Status Decrement(
+      ::grpc::ServerContext* context,
+      const ::cachelib::grpc::DecrementRequest* request,
+      ::cachelib::grpc::DecrementResponse* response) override;
+
+  // CompareAndSwap atomically updates a value if it matches expected
+  ::grpc::Status CompareAndSwap(
+      ::grpc::ServerContext* context,
+      const ::cachelib::grpc::CompareAndSwapRequest* request,
+      ::cachelib::grpc::CompareAndSwapResponse* response) override;
+
+  // ---------------------------------------------------------------------------
+  // TTL Operations
+  // ---------------------------------------------------------------------------
+
+  // GetTTL returns the remaining TTL for a key
+  ::grpc::Status GetTTL(
+      ::grpc::ServerContext* context,
+      const ::cachelib::grpc::GetTTLRequest* request,
+      ::cachelib::grpc::GetTTLResponse* response) override;
+
+  // Touch updates the TTL without changing the value
+  ::grpc::Status Touch(
+      ::grpc::ServerContext* context,
+      const ::cachelib::grpc::TouchRequest* request,
+      ::cachelib::grpc::TouchResponse* response) override;
+
+  // ---------------------------------------------------------------------------
+  // Key Scanning
+  // ---------------------------------------------------------------------------
+
+  // Scan iterates over keys matching a pattern
+  ::grpc::Status Scan(
+      ::grpc::ServerContext* context,
+      const ::cachelib::grpc::ScanRequest* request,
+      ::cachelib::grpc::ScanResponse* response) override;
+
+  // ---------------------------------------------------------------------------
+  // Administration
+  // ---------------------------------------------------------------------------
 
   // Stats returns cache statistics
   ::grpc::Status Stats(
@@ -76,6 +142,12 @@ class CacheServiceImpl final : public cachelib::grpc::CacheService::Service {
       ::grpc::ServerContext* context,
       const ::cachelib::grpc::PingRequest* request,
       ::cachelib::grpc::PingResponse* response) override;
+
+  // Flush removes all keys from the cache
+  ::grpc::Status Flush(
+      ::grpc::ServerContext* context,
+      const ::cachelib::grpc::FlushRequest* request,
+      ::cachelib::grpc::FlushResponse* response) override;
 
  private:
   std::shared_ptr<CacheManager> cacheManager_;

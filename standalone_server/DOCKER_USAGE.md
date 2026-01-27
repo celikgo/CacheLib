@@ -2,6 +2,8 @@
 
 A high-performance caching server from Meta/Facebook, available as a Docker container. Use it as an alternative to Redis with superior performance and hybrid DRAM+SSD caching capabilities.
 
+**Version:** 1.1.0
+
 ## Quick Start
 
 ### Pull and Run
@@ -67,9 +69,52 @@ volumes:
   nvm-data:
 ```
 
-## Proto File (Required for Clients)
+## API Reference
 
-All clients need the protocol buffer definition to generate gRPC stubs. Save as `cache.proto`:
+### Basic Operations
+
+| Operation | Description | Redis Equivalent |
+|-----------|-------------|------------------|
+| `Get` | Retrieve a value | `GET` |
+| `Set` | Store a value with TTL | `SET` / `SETEX` |
+| `Delete` | Remove a key | `DEL` |
+| `Exists` | Check if key exists | `EXISTS` |
+
+### Batch Operations
+
+| Operation | Description | Redis Equivalent |
+|-----------|-------------|------------------|
+| `MultiGet` | Get multiple keys | `MGET` |
+| `MultiSet` | Set multiple keys | `MSET` |
+
+### Atomic Operations
+
+| Operation | Description | Redis Equivalent |
+|-----------|-------------|------------------|
+| `SetNX` | Set if not exists | `SETNX` |
+| `Increment` | Atomic increment | `INCR` / `INCRBY` |
+| `Decrement` | Atomic decrement | `DECR` / `DECRBY` |
+| `CompareAndSwap` | Atomic CAS | (Lua script) |
+
+### TTL Operations
+
+| Operation | Description | Redis Equivalent |
+|-----------|-------------|------------------|
+| `GetTTL` | Get remaining TTL | `TTL` |
+| `Touch` | Update TTL | `EXPIRE` |
+
+### Administration
+
+| Operation | Description | Redis Equivalent |
+|-----------|-------------|------------------|
+| `Ping` | Health check | `PING` |
+| `Stats` | Cache statistics | `INFO` |
+| `Flush` | Clear all keys | `FLUSHALL` |
+| `Scan` | Iterate keys | `SCAN` |
+
+## Proto File
+
+Save as `cache.proto`:
 
 ```protobuf
 syntax = "proto3";
@@ -77,234 +122,202 @@ package cachelib.grpc;
 option java_package = "com.facebook.cachelib.grpc";
 
 service CacheService {
+  // Basic Operations
   rpc Get(GetRequest) returns (GetResponse);
   rpc Set(SetRequest) returns (SetResponse);
   rpc Delete(DeleteRequest) returns (DeleteResponse);
   rpc Exists(ExistsRequest) returns (ExistsResponse);
+
+  // Batch Operations
   rpc MultiGet(MultiGetRequest) returns (MultiGetResponse);
+  rpc MultiSet(MultiSetRequest) returns (MultiSetResponse);
+
+  // Atomic Operations
+  rpc SetNX(SetNXRequest) returns (SetNXResponse);
+  rpc Increment(IncrementRequest) returns (IncrementResponse);
+  rpc Decrement(DecrementRequest) returns (DecrementResponse);
+  rpc CompareAndSwap(CompareAndSwapRequest) returns (CompareAndSwapResponse);
+
+  // TTL Operations
+  rpc GetTTL(GetTTLRequest) returns (GetTTLResponse);
+  rpc Touch(TouchRequest) returns (TouchResponse);
+
+  // Administration
   rpc Ping(PingRequest) returns (PingResponse);
   rpc Stats(StatsRequest) returns (StatsResponse);
+  rpc Flush(FlushRequest) returns (FlushResponse);
+  rpc Scan(ScanRequest) returns (ScanResponse);
 }
 
+// Basic Operations
 message GetRequest { string key = 1; }
-message GetResponse { bool found = 1; bytes value = 2; }
+message GetResponse {
+  bool found = 1;
+  bytes value = 2;
+  int64 ttl_remaining = 3;  // -1 = no expiry
+}
 
-message SetRequest { string key = 1; bytes value = 2; int32 ttl_seconds = 3; }
-message SetResponse { bool success = 1; }
+message SetRequest {
+  string key = 1;
+  bytes value = 2;
+  int64 ttl_seconds = 3;  // 0 = no expiry
+}
+message SetResponse { bool success = 1; string message = 2; }
 
 message DeleteRequest { string key = 1; }
-message DeleteResponse { bool success = 1; }
+message DeleteResponse { bool success = 1; bool key_existed = 2; string message = 3; }
 
 message ExistsRequest { string key = 1; }
 message ExistsResponse { bool exists = 1; }
 
+// Batch Operations
 message MultiGetRequest { repeated string keys = 1; }
 message MultiGetResponse { repeated KeyValue results = 1; }
-message KeyValue { string key = 1; bytes value = 2; bool found = 3; }
+message KeyValue { string key = 1; bytes value = 2; bool found = 3; int64 ttl_remaining = 4; }
 
-message PingRequest {}
-message PingResponse { string message = 1; }
-
-message StatsRequest {}
-message StatsResponse {
-  uint64 total_size_bytes = 1;
-  uint64 used_size_bytes = 2;
-  uint64 item_count = 3;
-  uint64 get_count = 4;
-  uint64 hit_count = 5;
-  uint64 miss_count = 6;
-  uint64 set_count = 7;
-  uint64 eviction_count = 8;
-  uint64 uptime_seconds = 9;
+message MultiSetRequest { repeated SetRequest items = 1; }
+message MultiSetResponse {
+  bool success = 1;
+  int32 succeeded_count = 2;
+  int32 failed_count = 3;
+  string message = 4;
+  repeated string failed_keys = 5;
 }
+
+// Atomic Operations
+message SetNXRequest { string key = 1; bytes value = 2; int64 ttl_seconds = 3; }
+message SetNXResponse { bool was_set = 1; bytes existing_value = 2; string message = 3; }
+
+message IncrementRequest { string key = 1; int64 delta = 2; int64 ttl_seconds = 3; }
+message IncrementResponse { bool success = 1; int64 new_value = 2; string message = 3; }
+
+message DecrementRequest { string key = 1; int64 delta = 2; int64 ttl_seconds = 3; }
+message DecrementResponse { bool success = 1; int64 new_value = 2; string message = 3; }
+
+message CompareAndSwapRequest {
+  string key = 1;
+  bytes expected_value = 2;
+  bytes new_value = 3;
+  int64 ttl_seconds = 4;
+}
+message CompareAndSwapResponse { bool success = 1; bytes actual_value = 2; string message = 3; }
+
+// TTL Operations
+message GetTTLRequest { string key = 1; }
+message GetTTLResponse {
+  bool found = 1;
+  int64 ttl_seconds = 2;  // -2 = not found, -1 = no expiry, 0+ = seconds
+}
+
+message TouchRequest { string key = 1; int64 ttl_seconds = 2; }
+message TouchResponse { bool success = 1; string message = 2; }
+
+// Administration
+message PingRequest {}
+message PingResponse { string message = 1; int64 timestamp = 2; }
+
+message StatsRequest { bool detailed = 1; }
+message StatsResponse {
+  int64 total_size = 1;
+  int64 used_size = 2;
+  int64 item_count = 3;
+  double hit_rate = 4;
+  int64 get_count = 5;
+  int64 hit_count = 6;
+  int64 miss_count = 7;
+  int64 set_count = 8;
+  int64 delete_count = 9;
+  int64 eviction_count = 10;
+  int64 expired_count = 11;
+  bool nvm_enabled = 12;
+  int64 nvm_size = 13;
+  int64 nvm_used = 14;
+  int64 nvm_hit_count = 15;
+  int64 nvm_miss_count = 16;
+  int64 uptime_seconds = 17;
+  string version = 18;
+}
+
+message FlushRequest { bool include_nvm = 1; }
+message FlushResponse { bool success = 1; int64 items_removed = 2; string message = 3; }
+
+message ScanRequest { string pattern = 1; string cursor = 2; int32 count = 3; }
+message ScanResponse { repeated string keys = 1; string next_cursor = 2; bool has_more = 3; }
 ```
 
 ## Client Examples
 
 ### Python
 
-**Install dependencies:**
 ```bash
 pip install grpcio grpcio-tools
 python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. cache.proto
 ```
 
-**Usage:**
 ```python
 import grpc
-from cache_pb2 import SetRequest, GetRequest, PingRequest, DeleteRequest, StatsRequest
+from cache_pb2 import *
 from cache_pb2_grpc import CacheServiceStub
 
-# Connect
 channel = grpc.insecure_channel('localhost:50051')
 cache = CacheServiceStub(channel)
 
-# Ping - check server is alive
-response = cache.Ping(PingRequest())
-print(response.message)  # "pong"
-
-# Set - store with 5 minute TTL
-cache.Set(SetRequest(key="user:1", value=b'{"name":"John","email":"john@example.com"}', ttl_seconds=300))
-
-# Get - retrieve value
+# Basic Operations
+cache.Set(SetRequest(key="user:1", value=b'{"name":"John"}', ttl_seconds=300))
 response = cache.Get(GetRequest(key="user:1"))
 if response.found:
-    print(response.value.decode())  # {"name":"John","email":"john@example.com"}
+    print(response.value.decode())
+    print(f"TTL: {response.ttl_remaining}s")
 
-# Delete - remove key
-cache.Delete(DeleteRequest(key="user:1"))
+# Atomic Increment (rate limiting example)
+response = cache.Increment(IncrementRequest(key="ratelimit:user:1", delta=1, ttl_seconds=60))
+if response.success:
+    print(f"Request count: {response.new_value}")
 
-# Stats - get cache statistics
+# SetNX (distributed lock example)
+response = cache.SetNX(SetNXRequest(key="lock:resource", value=b"owner-1", ttl_seconds=30))
+if response.was_set:
+    print("Lock acquired!")
+else:
+    print("Lock held by another process")
+
+# TTL Operations
+ttl = cache.GetTTL(GetTTLRequest(key="user:1"))
+print(f"TTL remaining: {ttl.ttl_seconds}s")
+
+cache.Touch(TouchRequest(key="user:1", ttl_seconds=600))  # Extend TTL
+
+# Stats
 stats = cache.Stats(StatsRequest())
-print(f"Items: {stats.item_count}, Hit rate: {stats.hit_count}/{stats.get_count}")
-```
-
-### Go
-
-**Install dependencies:**
-```bash
-go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-protoc --go_out=. --go-grpc_out=. cache.proto
-```
-
-**Usage:**
-```go
-package main
-
-import (
-    "context"
-    "log"
-
-    pb "your-module/cache"
-    "google.golang.org/grpc"
-    "google.golang.org/grpc/credentials/insecure"
-)
-
-func main() {
-    // Connect
-    conn, err := grpc.Dial("localhost:50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer conn.Close()
-
-    client := pb.NewCacheServiceClient(conn)
-    ctx := context.Background()
-
-    // Ping
-    pong, _ := client.Ping(ctx, &pb.PingRequest{})
-    log.Println("Ping:", pong.Message)
-
-    // Set
-    client.Set(ctx, &pb.SetRequest{
-        Key:        "user:1",
-        Value:      []byte(`{"name":"John"}`),
-        TtlSeconds: 300,
-    })
-
-    // Get
-    resp, _ := client.Get(ctx, &pb.GetRequest{Key: "user:1"})
-    if resp.Found {
-        log.Println("Value:", string(resp.Value))
-    }
-
-    // Delete
-    client.Delete(ctx, &pb.DeleteRequest{Key: "user:1"})
-
-    // Stats
-    stats, _ := client.Stats(ctx, &pb.StatsRequest{})
-    log.Printf("Items: %d, Hits: %d, Misses: %d\n", stats.ItemCount, stats.HitCount, stats.MissCount)
-}
+print(f"Hit rate: {stats.hit_rate:.2%}")
+print(f"Items: {stats.item_count}")
+print(f"Uptime: {stats.uptime_seconds}s")
+print(f"Version: {stats.version}")
 ```
 
 ### Java / Spring Boot
 
-**Maven dependencies (pom.xml):**
-```xml
-<dependencies>
-    <dependency>
-        <groupId>io.grpc</groupId>
-        <artifactId>grpc-netty-shaded</artifactId>
-        <version>1.60.0</version>
-    </dependency>
-    <dependency>
-        <groupId>io.grpc</groupId>
-        <artifactId>grpc-protobuf</artifactId>
-        <version>1.60.0</version>
-    </dependency>
-    <dependency>
-        <groupId>io.grpc</groupId>
-        <artifactId>grpc-stub</artifactId>
-        <version>1.60.0</version>
-    </dependency>
-    <dependency>
-        <groupId>javax.annotation</groupId>
-        <artifactId>javax.annotation-api</artifactId>
-        <version>1.3.2</version>
-    </dependency>
-</dependencies>
-
-<build>
-    <extensions>
-        <extension>
-            <groupId>kr.motd.maven</groupId>
-            <artifactId>os-maven-plugin</artifactId>
-            <version>1.7.1</version>
-        </extension>
-    </extensions>
-    <plugins>
-        <plugin>
-            <groupId>org.xolstice.maven.plugins</groupId>
-            <artifactId>protobuf-maven-plugin</artifactId>
-            <version>0.6.1</version>
-            <configuration>
-                <protocArtifact>com.google.protobuf:protoc:3.25.1:exe:${os.detected.classifier}</protocArtifact>
-                <pluginId>grpc-java</pluginId>
-                <pluginArtifact>io.grpc:protoc-gen-grpc-java:1.60.0:exe:${os.detected.classifier}</pluginArtifact>
-            </configuration>
-            <executions>
-                <execution>
-                    <goals>
-                        <goal>compile</goal>
-                        <goal>compile-custom</goal>
-                    </goals>
-                </execution>
-            </executions>
-        </plugin>
-    </plugins>
-</build>
-```
-
-**Usage:**
 ```java
+import com.facebook.cachelib.grpc.*;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import com.google.protobuf.ByteString;
-import com.facebook.cachelib.grpc.*;
 
 public class CacheClient {
-    private final ManagedChannel channel;
     private final CacheServiceGrpc.CacheServiceBlockingStub stub;
 
     public CacheClient(String host, int port) {
-        this.channel = ManagedChannelBuilder
-            .forAddress(host, port)
-            .usePlaintext()
-            .build();
+        ManagedChannel channel = ManagedChannelBuilder.forAddress(host, port)
+            .usePlaintext().build();
         this.stub = CacheServiceGrpc.newBlockingStub(channel);
     }
 
-    public boolean ping() {
-        PingResponse resp = stub.ping(PingRequest.newBuilder().build());
-        return "pong".equals(resp.getMessage());
-    }
-
-    public void set(String key, String value, int ttlSeconds) {
+    // Basic Operations
+    public void set(String key, String value, int ttl) {
         stub.set(SetRequest.newBuilder()
             .setKey(key)
             .setValue(ByteString.copyFromUtf8(value))
-            .setTtlSeconds(ttlSeconds)
+            .setTtlSeconds(ttl)
             .build());
     }
 
@@ -313,220 +326,202 @@ public class CacheClient {
         return resp.getFound() ? resp.getValue().toStringUtf8() : null;
     }
 
-    public void delete(String key) {
-        stub.delete(DeleteRequest.newBuilder().setKey(key).build());
+    // Atomic Increment
+    public long increment(String key, long delta, int ttl) {
+        IncrementResponse resp = stub.increment(IncrementRequest.newBuilder()
+            .setKey(key)
+            .setDelta(delta)
+            .setTtlSeconds(ttl)
+            .build());
+        return resp.getNewValue();
     }
 
-    public void shutdown() {
-        channel.shutdown();
+    // Distributed Lock with SetNX
+    public boolean acquireLock(String resource, String owner, int ttlSeconds) {
+        SetNXResponse resp = stub.setNX(SetNXRequest.newBuilder()
+            .setKey("lock:" + resource)
+            .setValue(ByteString.copyFromUtf8(owner))
+            .setTtlSeconds(ttlSeconds)
+            .build());
+        return resp.getWasSet();
+    }
+
+    // Get TTL
+    public long getTTL(String key) {
+        GetTTLResponse resp = stub.getTTL(GetTTLRequest.newBuilder().setKey(key).build());
+        return resp.getTtlSeconds();
+    }
+
+    // Extend TTL
+    public boolean touch(String key, int newTtl) {
+        TouchResponse resp = stub.touch(TouchRequest.newBuilder()
+            .setKey(key)
+            .setTtlSeconds(newTtl)
+            .build());
+        return resp.getSuccess();
     }
 }
+```
 
-// Usage
-CacheClient cache = new CacheClient("localhost", 50051);
-cache.set("user:1", "{\"name\":\"John\"}", 300);
-String value = cache.get("user:1");
-cache.delete("user:1");
-cache.shutdown();
+### Go
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    pb "your-module/cache"
+    "google.golang.org/grpc"
+    "google.golang.org/grpc/credentials/insecure"
+)
+
+func main() {
+    conn, _ := grpc.Dial("localhost:50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
+    defer conn.Close()
+    client := pb.NewCacheServiceClient(conn)
+    ctx := context.Background()
+
+    // Basic Operations
+    client.Set(ctx, &pb.SetRequest{Key: "user:1", Value: []byte(`{"name":"John"}`), TtlSeconds: 300})
+
+    resp, _ := client.Get(ctx, &pb.GetRequest{Key: "user:1"})
+    if resp.Found {
+        log.Printf("Value: %s, TTL: %d", resp.Value, resp.TtlRemaining)
+    }
+
+    // Atomic Increment
+    incrResp, _ := client.Increment(ctx, &pb.IncrementRequest{Key: "counter", Delta: 1, TtlSeconds: 3600})
+    log.Printf("Counter: %d", incrResp.NewValue)
+
+    // SetNX for distributed lock
+    lockResp, _ := client.SetNX(ctx, &pb.SetNXRequest{Key: "lock:resource", Value: []byte("owner-1"), TtlSeconds: 30})
+    if lockResp.WasSet {
+        log.Println("Lock acquired!")
+    }
+
+    // Stats
+    stats, _ := client.Stats(ctx, &pb.StatsRequest{})
+    log.Printf("Version: %s, Uptime: %ds, Hit rate: %.2f%%",
+        stats.Version, stats.UptimeSeconds, stats.HitRate*100)
+}
 ```
 
 ### Node.js
 
-**Install dependencies:**
-```bash
-npm install @grpc/grpc-js @grpc/proto-loader
-```
-
-**Usage:**
 ```javascript
 const grpc = require('@grpc/grpc-js');
 const protoLoader = require('@grpc/proto-loader');
 
-// Load proto
 const packageDef = protoLoader.loadSync('cache.proto', {
-  keepCase: true,
-  longs: String,
-  enums: String,
-  defaults: true,
-  oneofs: true
+  keepCase: true, longs: String, enums: String, defaults: true, oneofs: true
 });
 const proto = grpc.loadPackageDefinition(packageDef).cachelib.grpc;
+const client = new proto.CacheService('localhost:50051', grpc.credentials.createInsecure());
 
-// Connect
-const client = new proto.CacheService(
-  'localhost:50051',
-  grpc.credentials.createInsecure()
-);
+// Basic Operations
+client.Set({ key: 'user:1', value: Buffer.from('{"name":"John"}'), ttl_seconds: 300 },
+  (err, resp) => console.log('Set:', resp.success));
 
-// Ping
-client.Ping({}, (err, response) => {
-  console.log('Ping:', response.message);  // "pong"
+client.Get({ key: 'user:1' }, (err, resp) => {
+  if (resp.found) console.log('Value:', resp.value.toString(), 'TTL:', resp.ttl_remaining);
 });
 
-// Set
-client.Set({
-  key: 'user:1',
-  value: Buffer.from('{"name":"John"}'),
-  ttl_seconds: 300
-}, (err, response) => {
-  console.log('Set success:', response.success);
+// Atomic Increment
+client.Increment({ key: 'counter', delta: 1, ttl_seconds: 3600 }, (err, resp) => {
+  console.log('Counter:', resp.new_value);
 });
 
-// Get
-client.Get({ key: 'user:1' }, (err, response) => {
-  if (response.found) {
-    console.log('Value:', response.value.toString());
-  }
-});
-
-// Delete
-client.Delete({ key: 'user:1' }, (err, response) => {
-  console.log('Delete success:', response.success);
-});
+// SetNX for distributed lock
+client.SetNX({ key: 'lock:resource', value: Buffer.from('owner-1'), ttl_seconds: 30 },
+  (err, resp) => console.log('Lock acquired:', resp.was_set));
 
 // Stats
-client.Stats({}, (err, response) => {
-  console.log('Items:', response.item_count);
-  console.log('Hit rate:', response.hit_count + '/' + response.get_count);
+client.Stats({}, (err, resp) => {
+  console.log(`Version: ${resp.version}, Uptime: ${resp.uptime_seconds}s`);
+  console.log(`Hit rate: ${(resp.hit_rate * 100).toFixed(2)}%`);
 });
 ```
 
-### Rust
+## Use Cases
 
-**Cargo.toml:**
-```toml
-[dependencies]
-tonic = "0.10"
-prost = "0.12"
-tokio = { version = "1", features = ["full"] }
+### Rate Limiting
 
-[build-dependencies]
-tonic-build = "0.10"
+```python
+def check_rate_limit(user_id, limit=100, window=60):
+    key = f"ratelimit:{user_id}"
+    resp = cache.Increment(IncrementRequest(key=key, delta=1, ttl_seconds=window))
+    return resp.new_value <= limit
 ```
 
-**build.rs:**
-```rust
-fn main() {
-    tonic_build::compile_protos("cache.proto").unwrap();
-}
+### Distributed Lock
+
+```python
+def acquire_lock(resource, owner, ttl=30):
+    resp = cache.SetNX(SetNXRequest(
+        key=f"lock:{resource}",
+        value=owner.encode(),
+        ttl_seconds=ttl
+    ))
+    return resp.was_set
+
+def release_lock(resource, owner):
+    # Use CAS to ensure we only release our own lock
+    resp = cache.CompareAndSwap(CompareAndSwapRequest(
+        key=f"lock:{resource}",
+        expected_value=owner.encode(),
+        new_value=b""
+    ))
+    if resp.success:
+        cache.Delete(DeleteRequest(key=f"lock:{resource}"))
 ```
 
-**Usage:**
-```rust
-use tonic::transport::Channel;
+### Session Management with Sliding Expiration
 
-pub mod cache {
-    tonic::include_proto!("cachelib.grpc");
-}
-
-use cache::cache_service_client::CacheServiceClient;
-use cache::{GetRequest, SetRequest, PingRequest};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = CacheServiceClient::connect("http://localhost:50051").await?;
-
-    // Ping
-    let response = client.ping(PingRequest {}).await?;
-    println!("Ping: {}", response.into_inner().message);
-
-    // Set
-    client.set(SetRequest {
-        key: "user:1".into(),
-        value: b"{\"name\":\"John\"}".to_vec(),
-        ttl_seconds: 300,
-    }).await?;
-
-    // Get
-    let response = client.get(GetRequest { key: "user:1".into() }).await?;
-    let resp = response.into_inner();
-    if resp.found {
-        println!("Value: {}", String::from_utf8_lossy(&resp.value));
-    }
-
-    Ok(())
-}
+```python
+def get_session(session_id):
+    resp = cache.Get(GetRequest(key=f"session:{session_id}"))
+    if resp.found:
+        # Extend session TTL on access
+        cache.Touch(TouchRequest(key=f"session:{session_id}", ttl_seconds=1800))
+        return resp.value.decode()
+    return None
 ```
 
 ## Full Example Projects
 
-### Spring Boot + CacheLib Demo
-
-A complete Spring Boot application with Docker Compose deployment:
-
-https://github.com/celikgo/CacheLib/tree/main/examples/spring-cachelib-demo
-
-Features:
-- Cache-aside pattern implementation
-- REST API with automatic caching
-- Cache statistics and health endpoints
-- Docker Compose for full stack deployment
+- **Spring Boot Demo**: https://github.com/celikgo/CacheLib/tree/main/examples/spring-cachelib-demo
 
 ## Comparison with Redis
 
-| Aspect | Redis | CacheLib |
-|--------|-------|----------|
-| **Protocol** | RESP (text-based) | gRPC (binary, efficient) |
-| **Hybrid Cache** | No (memory only) | Yes (DRAM + SSD) |
-| **Large Datasets** | Limited by RAM | Can use SSD for overflow |
-| **Performance** | Very fast | Faster (optimized for caching) |
-| **Clustering** | Built-in | Single node |
-| **Spring Integration** | Native `@Cacheable` | Manual gRPC client |
-
-### When to Use CacheLib
-
-- Large datasets that exceed available RAM
-- Need hybrid DRAM+SSD caching
-- High-performance caching with predictable latency
-- Binary data caching (images, serialized objects)
-
-### When to Use Redis
-
-- Need pub/sub messaging
-- Need built-in clustering
-- Want native Spring `@Cacheable` support
-- Need data structures (lists, sets, sorted sets)
+| Feature | Redis | CacheLib |
+|---------|-------|----------|
+| Protocol | RESP | gRPC |
+| Hybrid Cache | No | Yes (DRAM+SSD) |
+| SetNX | ✅ | ✅ |
+| INCR/DECR | ✅ | ✅ |
+| TTL/EXPIRE | ✅ | ✅ |
+| CAS | Via Lua | ✅ Native |
+| Clustering | Built-in | Single node |
 
 ## Troubleshooting
+
+### Stats show 0 for counters
+
+Ensure you're checking after operations. Stats are tracked per-server instance and reset on restart.
 
 ### Connection refused
 
 ```bash
-# Check if container is running
 docker ps | grep cachelib
-
-# Check container logs
 docker logs cachelib
-
-# Test port
 nc -zv localhost 50051
 ```
-
-### High memory usage
-
-Reduce cache size:
-```bash
-docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:latest \
-  --cache_size=536870912  # 512 MB
-```
-
-### Container crashes
-
-Check logs for errors:
-```bash
-docker logs cachelib
-```
-
-Common issues:
-- Insufficient memory for requested cache size
-- Port already in use
 
 ## Links
 
 - [CacheLib Documentation](https://cachelib.org/)
-- [CacheLib GitHub](https://github.com/facebook/CacheLib)
 - [gRPC Documentation](https://grpc.io/docs/)
-- [Protocol Buffers](https://protobuf.dev/)
 
 ## License
 

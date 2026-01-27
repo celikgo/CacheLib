@@ -20,80 +20,90 @@ option java_package = "com.facebook.cachelib.grpc";
 option java_outer_classname = "CacheProto";
 option java_multiple_files = true;
 
-// CacheService provides a Redis-like interface to CacheLib
-// allowing remote access to the cache over gRPC.
+// =============================================================================
+// CacheService - High-performance caching service powered by CacheLib
+// =============================================================================
 service CacheService {
-  // Get retrieves a value from the cache by key.
-  // Returns empty value if key not found.
+  // Basic Operations
   rpc Get(GetRequest) returns (GetResponse) {}
-
-  // Set stores a key-value pair in the cache with optional TTL.
   rpc Set(SetRequest) returns (SetResponse) {}
-
-  // Delete removes a key from the cache.
   rpc Delete(DeleteRequest) returns (DeleteResponse) {}
-
-  // MultiGet retrieves multiple values in a single call.
-  rpc MultiGet(MultiGetRequest) returns (MultiGetResponse) {}
-
-  // MultiSet stores multiple key-value pairs in a single call.
-  rpc MultiSet(MultiSetRequest) returns (MultiSetResponse) {}
-
-  // Exists checks if a key exists in the cache.
   rpc Exists(ExistsRequest) returns (ExistsResponse) {}
 
-  // Stats returns cache statistics.
-  rpc Stats(StatsRequest) returns (StatsResponse) {}
+  // Batch Operations
+  rpc MultiGet(MultiGetRequest) returns (MultiGetResponse) {}
+  rpc MultiSet(MultiSetRequest) returns (MultiSetResponse) {}
 
-  // Ping checks if the server is alive.
+  // Atomic Operations
+  rpc SetNX(SetNXRequest) returns (SetNXResponse) {}
+  rpc Increment(IncrementRequest) returns (IncrementResponse) {}
+  rpc Decrement(DecrementRequest) returns (DecrementResponse) {}
+  rpc CompareAndSwap(CompareAndSwapRequest) returns (CompareAndSwapResponse) {}
+
+  // TTL Operations
+  rpc GetTTL(GetTTLRequest) returns (GetTTLResponse) {}
+  rpc Touch(TouchRequest) returns (TouchResponse) {}
+
+  // Key Scanning
+  rpc Scan(ScanRequest) returns (ScanResponse) {}
+
+  // Administration
+  rpc Stats(StatsRequest) returns (StatsResponse) {}
   rpc Ping(PingRequest) returns (PingResponse) {}
+  rpc Flush(FlushRequest) returns (FlushResponse) {}
 }
 
-// GetRequest contains the key to retrieve.
+// =============================================================================
+// Basic Operation Messages
+// =============================================================================
+
 message GetRequest {
   string key = 1;
 }
 
-// GetResponse contains the retrieved value.
 message GetResponse {
   bool found = 1;
   bytes value = 2;
-  // Remaining TTL in seconds (0 if no expiry set)
   int64 ttl_remaining = 3;
 }
 
-// SetRequest contains the key-value pair to store.
 message SetRequest {
   string key = 1;
   bytes value = 2;
-  // TTL in seconds (0 means no expiration)
   int64 ttl_seconds = 3;
 }
 
-// SetResponse indicates if the set operation succeeded.
 message SetResponse {
   bool success = 1;
   string message = 2;
 }
 
-// DeleteRequest contains the key to delete.
 message DeleteRequest {
   string key = 1;
 }
 
-// DeleteResponse indicates if the delete operation succeeded.
 message DeleteResponse {
   bool success = 1;
   bool key_existed = 2;
   string message = 3;
 }
 
-// MultiGetRequest contains multiple keys to retrieve.
+message ExistsRequest {
+  string key = 1;
+}
+
+message ExistsResponse {
+  bool exists = 1;
+}
+
+// =============================================================================
+// Batch Operation Messages
+// =============================================================================
+
 message MultiGetRequest {
   repeated string keys = 1;
 }
 
-// KeyValue represents a single key-value pair in multi operations.
 message KeyValue {
   string key = 1;
   bytes value = 2;
@@ -101,41 +111,122 @@ message KeyValue {
   int64 ttl_remaining = 4;
 }
 
-// MultiGetResponse contains multiple key-value results.
 message MultiGetResponse {
   repeated KeyValue results = 1;
 }
 
-// MultiSetRequest contains multiple key-value pairs to store.
 message MultiSetRequest {
   repeated SetRequest items = 1;
 }
 
-// MultiSetResponse indicates results of multi-set operation.
 message MultiSetResponse {
   bool success = 1;
   int32 succeeded_count = 2;
   int32 failed_count = 3;
   string message = 4;
+  repeated string failed_keys = 5;
 }
 
-// ExistsRequest checks for key existence.
-message ExistsRequest {
+// =============================================================================
+// Atomic Operation Messages
+// =============================================================================
+
+message SetNXRequest {
+  string key = 1;
+  bytes value = 2;
+  int64 ttl_seconds = 3;
+}
+
+message SetNXResponse {
+  bool was_set = 1;
+  bytes existing_value = 2;
+  string message = 3;
+}
+
+message IncrementRequest {
+  string key = 1;
+  int64 delta = 2;
+  int64 ttl_seconds = 3;
+}
+
+message IncrementResponse {
+  bool success = 1;
+  int64 new_value = 2;
+  string message = 3;
+}
+
+message DecrementRequest {
+  string key = 1;
+  int64 delta = 2;
+  int64 ttl_seconds = 3;
+}
+
+message DecrementResponse {
+  bool success = 1;
+  int64 new_value = 2;
+  string message = 3;
+}
+
+message CompareAndSwapRequest {
+  string key = 1;
+  bytes expected_value = 2;
+  bytes new_value = 3;
+  int64 ttl_seconds = 4;
+}
+
+message CompareAndSwapResponse {
+  bool success = 1;
+  bytes actual_value = 2;
+  string message = 3;
+}
+
+// =============================================================================
+// TTL Operation Messages
+// =============================================================================
+
+message GetTTLRequest {
   string key = 1;
 }
 
-// ExistsResponse indicates if the key exists.
-message ExistsResponse {
-  bool exists = 1;
+message GetTTLResponse {
+  bool found = 1;
+  int64 ttl_seconds = 2;
 }
 
-// StatsRequest requests cache statistics.
+message TouchRequest {
+  string key = 1;
+  int64 ttl_seconds = 2;
+}
+
+message TouchResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// =============================================================================
+// Key Scanning Messages
+// =============================================================================
+
+message ScanRequest {
+  string pattern = 1;
+  string cursor = 2;
+  int32 count = 3;
+}
+
+message ScanResponse {
+  repeated string keys = 1;
+  string next_cursor = 2;
+  bool has_more = 3;
+}
+
+// =============================================================================
+// Administration Messages
+// =============================================================================
+
 message StatsRequest {
-  // If true, include detailed per-pool stats
   bool detailed = 1;
 }
 
-// PoolStats contains statistics for a single memory pool.
 message PoolStats {
   string pool_name = 1;
   int64 pool_size = 2;
@@ -144,43 +235,41 @@ message PoolStats {
   double hit_rate = 5;
 }
 
-// StatsResponse contains cache statistics.
 message StatsResponse {
-  // Total cache size in bytes
   int64 total_size = 1;
-  // Used cache size in bytes
   int64 used_size = 2;
-  // Number of items in cache
   int64 item_count = 3;
-  // Cache hit rate (0.0 - 1.0)
   double hit_rate = 4;
-  // Number of gets
   int64 get_count = 5;
-  // Number of hits
   int64 hit_count = 6;
-  // Number of misses
   int64 miss_count = 7;
-  // Number of sets
   int64 set_count = 8;
-  // Number of evictions
-  int64 eviction_count = 9;
-  // Flash/NVM cache enabled
-  bool nvm_enabled = 10;
-  // Flash/NVM cache size if enabled
-  int64 nvm_size = 11;
-  // Flash/NVM cache used if enabled
-  int64 nvm_used = 12;
-  // Per-pool statistics
-  repeated PoolStats pool_stats = 13;
-  // Server uptime in seconds
-  int64 uptime_seconds = 14;
+  int64 delete_count = 9;
+  int64 eviction_count = 10;
+  int64 expired_count = 11;
+  bool nvm_enabled = 12;
+  int64 nvm_size = 13;
+  int64 nvm_used = 14;
+  int64 nvm_hit_count = 15;
+  int64 nvm_miss_count = 16;
+  int64 uptime_seconds = 17;
+  string version = 18;
+  repeated PoolStats pool_stats = 19;
 }
 
-// PingRequest is an empty request for health check.
 message PingRequest {}
 
-// PingResponse confirms server is alive.
 message PingResponse {
   string message = 1;
   int64 timestamp = 2;
+}
+
+message FlushRequest {
+  bool include_nvm = 1;
+}
+
+message FlushResponse {
+  bool success = 1;
+  int64 items_removed = 2;
+  string message = 3;
 }

@@ -14,7 +14,9 @@
 
 #include "CacheManager.h"
 
+#include <charconv>
 #include <cstring>
+#include <regex>
 
 #include <cachelib/allocator/nvmcache/NavyConfig.h>
 #include <folly/logging/xlog.h>
@@ -121,12 +123,17 @@ void CacheManager::shutdown() {
   }
 }
 
+// =============================================================================
+// Basic Operations
+// =============================================================================
+
 GetResult CacheManager::get(std::string_view key) {
   GetResult result;
   ++getCount_;
 
   if (!cache_) {
     XLOG(WARN) << "Cache not initialized";
+    ++missCount_;
     return result;
   }
 
@@ -144,13 +151,18 @@ GetResult CacheManager::get(std::string_view key) {
 
       // Calculate remaining TTL
       uint32_t expiryTime = handle->getExpiryTime();
-      if (expiryTime > 0) {
+      if (expiryTime == 0) {
+        // No expiration set
+        result.ttlRemaining = -1;
+      } else {
         uint32_t now = static_cast<uint32_t>(
             std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::system_clock::now().time_since_epoch())
                 .count());
         if (expiryTime > now) {
           result.ttlRemaining = static_cast<int64_t>(expiryTime - now);
+        } else {
+          result.ttlRemaining = 0;
         }
       }
     } else {
@@ -208,6 +220,8 @@ bool CacheManager::set(std::string_view key,
 }
 
 bool CacheManager::remove(std::string_view key) {
+  ++deleteCount_;
+
   if (!cache_) {
     XLOG(WARN) << "Cache not initialized";
     return false;
@@ -237,6 +251,10 @@ bool CacheManager::exists(std::string_view key) {
   }
 }
 
+// =============================================================================
+// Batch Operations
+// =============================================================================
+
 std::vector<GetResult> CacheManager::multiGet(
     const std::vector<std::string>& keys) {
   std::vector<GetResult> results;
@@ -249,8 +267,347 @@ std::vector<GetResult> CacheManager::multiGet(
   return results;
 }
 
+std::vector<std::string> CacheManager::multiSet(
+    const std::vector<std::tuple<std::string, std::string, uint32_t>>& items) {
+  std::vector<std::string> failedKeys;
+
+  for (const auto& [key, value, ttl] : items) {
+    if (!set(key, value, ttl)) {
+      failedKeys.push_back(key);
+    }
+  }
+
+  return failedKeys;
+}
+
+// =============================================================================
+// Atomic Operations
+// =============================================================================
+
+SetNXResult CacheManager::setNX(std::string_view key,
+                                 std::string_view value,
+                                 uint32_t ttlSeconds) {
+  SetNXResult result;
+
+  if (!cache_) {
+    XLOG(WARN) << "Cache not initialized";
+    return result;
+  }
+
+  std::lock_guard<std::mutex> lock(atomicOpMutex_);
+
+  // Check if key exists
+  auto existingHandle = cache_->find(folly::StringPiece(key.data(), key.size()));
+  if (existingHandle) {
+    result.wasSet = false;
+    const char* data = reinterpret_cast<const char*>(existingHandle->getMemory());
+    size_t size = existingHandle->getSize();
+    result.existingValue.assign(data, size);
+    return result;
+  }
+
+  // Key doesn't exist, set it
+  if (set(key, value, ttlSeconds)) {
+    result.wasSet = true;
+  }
+
+  return result;
+}
+
+IncrDecrResult CacheManager::atomicAddValue(std::string_view key,
+                                             int64_t delta,
+                                             uint32_t ttlSeconds) {
+  IncrDecrResult result;
+
+  if (!cache_) {
+    result.message = "Cache not initialized";
+    return result;
+  }
+
+  std::lock_guard<std::mutex> lock(atomicOpMutex_);
+
+  int64_t currentValue = 0;
+  uint32_t existingTtl = ttlSeconds;
+
+  // Try to get existing value
+  auto existingHandle = cache_->find(folly::StringPiece(key.data(), key.size()));
+  if (existingHandle) {
+    const char* data = reinterpret_cast<const char*>(existingHandle->getMemory());
+    size_t size = existingHandle->getSize();
+    std::string valueStr(data, size);
+
+    // Parse as integer
+    auto parseResult = std::from_chars(
+        valueStr.data(), valueStr.data() + valueStr.size(), currentValue);
+    if (parseResult.ec != std::errc()) {
+      result.message = "Value is not a valid integer";
+      return result;
+    }
+
+    // Preserve existing TTL if not specified
+    if (ttlSeconds == 0) {
+      uint32_t expiryTime = existingHandle->getExpiryTime();
+      if (expiryTime > 0) {
+        uint32_t now = static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
+        if (expiryTime > now) {
+          existingTtl = expiryTime - now;
+        }
+      }
+    }
+  }
+
+  // Calculate new value
+  int64_t newValue = currentValue + delta;
+  std::string newValueStr = std::to_string(newValue);
+
+  // Store the new value
+  if (set(key, newValueStr, existingTtl)) {
+    result.success = true;
+    result.newValue = newValue;
+  } else {
+    result.message = "Failed to store new value";
+  }
+
+  return result;
+}
+
+IncrDecrResult CacheManager::increment(std::string_view key,
+                                        int64_t delta,
+                                        uint32_t ttlSeconds) {
+  if (delta == 0) {
+    delta = 1;
+  }
+  return atomicAddValue(key, delta, ttlSeconds);
+}
+
+IncrDecrResult CacheManager::decrement(std::string_view key,
+                                        int64_t delta,
+                                        uint32_t ttlSeconds) {
+  if (delta == 0) {
+    delta = 1;
+  }
+  return atomicAddValue(key, -delta, ttlSeconds);
+}
+
+CASResult CacheManager::compareAndSwap(std::string_view key,
+                                        std::string_view expectedValue,
+                                        std::string_view newValue,
+                                        int32_t ttlSeconds) {
+  CASResult result;
+
+  if (!cache_) {
+    return result;
+  }
+
+  std::lock_guard<std::mutex> lock(atomicOpMutex_);
+
+  // Get current value
+  auto existingHandle = cache_->find(folly::StringPiece(key.data(), key.size()));
+  if (!existingHandle) {
+    result.success = false;
+    return result;
+  }
+
+  const char* data = reinterpret_cast<const char*>(existingHandle->getMemory());
+  size_t size = existingHandle->getSize();
+  result.actualValue.assign(data, size);
+
+  // Compare
+  if (result.actualValue != expectedValue) {
+    result.success = false;
+    return result;
+  }
+
+  // Get existing TTL if ttlSeconds is 0
+  uint32_t effectiveTtl = static_cast<uint32_t>(ttlSeconds);
+  if (ttlSeconds == 0) {
+    uint32_t expiryTime = existingHandle->getExpiryTime();
+    if (expiryTime > 0) {
+      uint32_t now = static_cast<uint32_t>(
+          std::chrono::duration_cast<std::chrono::seconds>(
+              std::chrono::system_clock::now().time_since_epoch())
+              .count());
+      if (expiryTime > now) {
+        effectiveTtl = expiryTime - now;
+      }
+    }
+  } else if (ttlSeconds < 0) {
+    effectiveTtl = 0;  // No expiration
+  }
+
+  // Values match, perform swap
+  if (set(key, newValue, effectiveTtl)) {
+    result.success = true;
+    result.actualValue = std::string(newValue);
+  }
+
+  return result;
+}
+
+// =============================================================================
+// TTL Operations
+// =============================================================================
+
+int64_t CacheManager::getTTL(std::string_view key) {
+  if (!cache_) {
+    return -2;  // Not found
+  }
+
+  try {
+    auto handle = cache_->find(folly::StringPiece(key.data(), key.size()));
+    if (!handle) {
+      return -2;  // Key not found
+    }
+
+    uint32_t expiryTime = handle->getExpiryTime();
+    if (expiryTime == 0) {
+      return -1;  // No expiration
+    }
+
+    uint32_t now = static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+
+    if (expiryTime > now) {
+      return static_cast<int64_t>(expiryTime - now);
+    }
+    return 0;  // Expired
+  } catch (const std::exception& ex) {
+    XLOG(ERR) << "Error during getTTL for key=" << key << ": " << ex.what();
+    return -2;
+  }
+}
+
+TouchResult CacheManager::touch(std::string_view key, uint32_t ttlSeconds) {
+  TouchResult result;
+
+  if (!cache_) {
+    result.message = "Cache not initialized";
+    return result;
+  }
+
+  std::lock_guard<std::mutex> lock(atomicOpMutex_);
+
+  // Get current value
+  auto existingHandle = cache_->find(folly::StringPiece(key.data(), key.size()));
+  if (!existingHandle) {
+    result.message = "Key not found";
+    return result;
+  }
+
+  // Get the value
+  const char* data = reinterpret_cast<const char*>(existingHandle->getMemory());
+  size_t size = existingHandle->getSize();
+  std::string value(data, size);
+
+  // Re-set with new TTL (this is the only way to update TTL in CacheLib)
+  if (set(key, value, ttlSeconds)) {
+    result.success = true;
+    result.message = "TTL updated";
+  } else {
+    result.message = "Failed to update TTL";
+  }
+
+  return result;
+}
+
+// =============================================================================
+// Key Scanning
+// =============================================================================
+
+bool CacheManager::matchesPattern(const std::string& key,
+                                   const std::string& pattern) const {
+  if (pattern.empty() || pattern == "*") {
+    return true;
+  }
+
+  // Simple wildcard matching
+  // Convert glob pattern to regex
+  std::string regexPattern;
+  for (char c : pattern) {
+    switch (c) {
+      case '*':
+        regexPattern += ".*";
+        break;
+      case '?':
+        regexPattern += ".";
+        break;
+      case '.':
+      case '[':
+      case ']':
+      case '(':
+      case ')':
+      case '{':
+      case '}':
+      case '+':
+      case '^':
+      case '$':
+      case '|':
+      case '\\':
+        regexPattern += '\\';
+        regexPattern += c;
+        break;
+      default:
+        regexPattern += c;
+    }
+  }
+
+  try {
+    std::regex re(regexPattern);
+    return std::regex_match(key, re);
+  } catch (const std::regex_error&) {
+    // If regex fails, fall back to simple prefix matching
+    if (pattern.back() == '*') {
+      std::string prefix = pattern.substr(0, pattern.size() - 1);
+      return key.substr(0, prefix.size()) == prefix;
+    }
+    return key == pattern;
+  }
+}
+
+ScanResult CacheManager::scan(const std::string& pattern,
+                               const std::string& cursor,
+                               int32_t count) {
+  ScanResult result;
+
+  if (!cache_) {
+    return result;
+  }
+
+  if (count <= 0) {
+    count = 100;
+  }
+  if (count > 10000) {
+    count = 10000;
+  }
+
+  // Note: CacheLib doesn't have a native scan/iterate API that's exposed
+  // in a simple way. This is a limitation. For now, we'll return an
+  // empty result and log a warning.
+  //
+  // A full implementation would require iterating over all items,
+  // which could be expensive for large caches.
+
+  XLOG(WARN) << "Scan operation is not fully implemented - "
+             << "CacheLib doesn't expose a simple iteration API";
+
+  result.hasMore = false;
+  result.nextCursor = "";
+
+  return result;
+}
+
+// =============================================================================
+// Administration
+// =============================================================================
+
 CacheStats CacheManager::getStats() const {
   CacheStats stats;
+  stats.version = kServerVersion;
 
   if (!cache_) {
     return stats;
@@ -260,16 +617,25 @@ CacheStats CacheManager::getStats() const {
     auto memStats = cache_->getCacheMemoryStats();
     auto globalStats = cache_->getGlobalCacheStats();
 
+    // Memory stats
     stats.totalSize = static_cast<int64_t>(memStats.ramCacheSize);
-    stats.usedSize = static_cast<int64_t>(
-        memStats.ramCacheSize - memStats.unReservedSize);
+
+    // Calculate actual used size from pool stats
+    auto poolStats = cache_->getPoolStats(defaultPoolId_);
+    stats.usedSize = static_cast<int64_t>(poolStats.poolUsableSize - poolStats.freeMemorySize());
+    if (stats.usedSize < 0) {
+      stats.usedSize = 0;
+    }
+
     stats.itemCount = static_cast<int64_t>(globalStats.numItems);
     stats.evictionCount = static_cast<int64_t>(globalStats.numEvictions);
 
+    // Our tracked counters
     stats.getCount = getCount_.load();
     stats.hitCount = hitCount_.load();
     stats.missCount = missCount_.load();
     stats.setCount = setCount_.load();
+    stats.deleteCount = deleteCount_.load();
 
     if (stats.getCount > 0) {
       stats.hitRate =
@@ -282,10 +648,20 @@ CacheStats CacheManager::getStats() const {
       auto nvmStatsMap = cache_->getNvmCacheStatsMap();
       auto nvmStats = nvmStatsMap.toMap();
       stats.nvmSize = static_cast<int64_t>(config_.nvmCacheSize);
-      // NVM used bytes would come from Navy stats
-      auto it = nvmStats.find("navy_device_bytes_written");
-      if (it != nvmStats.end()) {
-        stats.nvmUsed = static_cast<int64_t>(it->second);
+
+      auto bytesWrittenIt = nvmStats.find("navy_device_bytes_written");
+      if (bytesWrittenIt != nvmStats.end()) {
+        stats.nvmUsed = static_cast<int64_t>(bytesWrittenIt->second);
+      }
+
+      auto nvmGetsIt = nvmStats.find("navy_gets");
+      auto nvmHitsIt = nvmStats.find("navy_hits");
+      if (nvmGetsIt != nvmStats.end()) {
+        int64_t nvmGets = static_cast<int64_t>(nvmGetsIt->second);
+        if (nvmHitsIt != nvmStats.end()) {
+          stats.nvmHitCount = static_cast<int64_t>(nvmHitsIt->second);
+          stats.nvmMissCount = nvmGets - stats.nvmHitCount;
+        }
       }
     }
 
@@ -300,6 +676,19 @@ CacheStats CacheManager::getStats() const {
   }
 
   return stats;
+}
+
+int64_t CacheManager::flush() {
+  if (!cache_) {
+    return 0;
+  }
+
+  // CacheLib doesn't have a direct flush API
+  // We would need to iterate and remove all items, which is expensive
+  // For now, the best approach is to recreate the cache
+
+  XLOG(WARN) << "Flush operation requires cache restart - not implemented";
+  return 0;
 }
 
 }  // namespace grpc_server

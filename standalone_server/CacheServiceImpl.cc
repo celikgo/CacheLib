@@ -26,6 +26,10 @@ CacheServiceImpl::CacheServiceImpl(std::shared_ptr<CacheManager> cacheManager)
   XLOG(INFO) << "CacheServiceImpl created";
 }
 
+// =============================================================================
+// Basic Operations
+// =============================================================================
+
 ::grpc::Status CacheServiceImpl::Get(
     ::grpc::ServerContext* /*context*/,
     const ::cachelib::grpc::GetRequest* request,
@@ -118,6 +122,29 @@ CacheServiceImpl::CacheServiceImpl(std::shared_ptr<CacheManager> cacheManager)
   return ::grpc::Status::OK;
 }
 
+::grpc::Status CacheServiceImpl::Exists(
+    ::grpc::ServerContext* /*context*/,
+    const ::cachelib::grpc::ExistsRequest* request,
+    ::cachelib::grpc::ExistsResponse* response) {
+  if (!cacheManager_->isReady()) {
+    return ::grpc::Status(
+        ::grpc::StatusCode::UNAVAILABLE, "Cache not initialized");
+  }
+
+  if (request->key().empty()) {
+    return ::grpc::Status(
+        ::grpc::StatusCode::INVALID_ARGUMENT, "Key cannot be empty");
+  }
+
+  response->set_exists(cacheManager_->exists(request->key()));
+
+  return ::grpc::Status::OK;
+}
+
+// =============================================================================
+// Batch Operations
+// =============================================================================
+
 ::grpc::Status CacheServiceImpl::MultiGet(
     ::grpc::ServerContext* /*context*/,
     const ::cachelib::grpc::MultiGetRequest* request,
@@ -159,30 +186,29 @@ CacheServiceImpl::CacheServiceImpl(std::shared_ptr<CacheManager> cacheManager)
         ::grpc::StatusCode::UNAVAILABLE, "Cache not initialized");
   }
 
-  int32_t succeeded = 0;
-  int32_t failed = 0;
+  std::vector<std::tuple<std::string, std::string, uint32_t>> items;
+  items.reserve(request->items_size());
 
   for (const auto& item : request->items()) {
     if (item.key().empty()) {
-      ++failed;
       continue;
     }
-
-    uint32_t ttlSeconds = 0;
-    if (item.ttl_seconds() > 0) {
-      ttlSeconds = static_cast<uint32_t>(item.ttl_seconds());
-    }
-
-    if (cacheManager_->set(item.key(), item.value(), ttlSeconds)) {
-      ++succeeded;
-    } else {
-      ++failed;
-    }
+    uint32_t ttl = item.ttl_seconds() > 0 ? static_cast<uint32_t>(item.ttl_seconds()) : 0;
+    items.emplace_back(item.key(), item.value(), ttl);
   }
+
+  auto failedKeys = cacheManager_->multiSet(items);
+
+  int32_t succeeded = static_cast<int32_t>(items.size() - failedKeys.size());
+  int32_t failed = static_cast<int32_t>(failedKeys.size());
 
   response->set_success(failed == 0);
   response->set_succeeded_count(succeeded);
   response->set_failed_count(failed);
+
+  for (const auto& key : failedKeys) {
+    response->add_failed_keys(key);
+  }
 
   if (failed == 0) {
     response->set_message("All items set successfully");
@@ -194,24 +220,247 @@ CacheServiceImpl::CacheServiceImpl(std::shared_ptr<CacheManager> cacheManager)
   return ::grpc::Status::OK;
 }
 
-::grpc::Status CacheServiceImpl::Exists(
+// =============================================================================
+// Atomic Operations
+// =============================================================================
+
+::grpc::Status CacheServiceImpl::SetNX(
     ::grpc::ServerContext* /*context*/,
-    const ::cachelib::grpc::ExistsRequest* request,
-    ::cachelib::grpc::ExistsResponse* response) {
+    const ::cachelib::grpc::SetNXRequest* request,
+    ::cachelib::grpc::SetNXResponse* response) {
   if (!cacheManager_->isReady()) {
+    response->set_was_set(false);
+    response->set_message("Cache not initialized");
     return ::grpc::Status(
         ::grpc::StatusCode::UNAVAILABLE, "Cache not initialized");
   }
 
   if (request->key().empty()) {
+    response->set_was_set(false);
+    response->set_message("Key cannot be empty");
     return ::grpc::Status(
         ::grpc::StatusCode::INVALID_ARGUMENT, "Key cannot be empty");
   }
 
-  response->set_exists(cacheManager_->exists(request->key()));
+  uint32_t ttlSeconds = 0;
+  if (request->ttl_seconds() > 0) {
+    ttlSeconds = static_cast<uint32_t>(request->ttl_seconds());
+  }
+
+  auto result = cacheManager_->setNX(request->key(), request->value(), ttlSeconds);
+
+  response->set_was_set(result.wasSet);
+  if (result.wasSet) {
+    response->set_message("Key set successfully");
+  } else {
+    response->set_message("Key already exists");
+    response->set_existing_value(result.existingValue);
+  }
 
   return ::grpc::Status::OK;
 }
+
+::grpc::Status CacheServiceImpl::Increment(
+    ::grpc::ServerContext* /*context*/,
+    const ::cachelib::grpc::IncrementRequest* request,
+    ::cachelib::grpc::IncrementResponse* response) {
+  if (!cacheManager_->isReady()) {
+    response->set_success(false);
+    response->set_message("Cache not initialized");
+    return ::grpc::Status(
+        ::grpc::StatusCode::UNAVAILABLE, "Cache not initialized");
+  }
+
+  if (request->key().empty()) {
+    response->set_success(false);
+    response->set_message("Key cannot be empty");
+    return ::grpc::Status(
+        ::grpc::StatusCode::INVALID_ARGUMENT, "Key cannot be empty");
+  }
+
+  int64_t delta = request->delta();
+  if (delta == 0) {
+    delta = 1;
+  }
+
+  uint32_t ttlSeconds = 0;
+  if (request->ttl_seconds() > 0) {
+    ttlSeconds = static_cast<uint32_t>(request->ttl_seconds());
+  }
+
+  auto result = cacheManager_->increment(request->key(), delta, ttlSeconds);
+
+  response->set_success(result.success);
+  response->set_new_value(result.newValue);
+  response->set_message(result.message);
+
+  return ::grpc::Status::OK;
+}
+
+::grpc::Status CacheServiceImpl::Decrement(
+    ::grpc::ServerContext* /*context*/,
+    const ::cachelib::grpc::DecrementRequest* request,
+    ::cachelib::grpc::DecrementResponse* response) {
+  if (!cacheManager_->isReady()) {
+    response->set_success(false);
+    response->set_message("Cache not initialized");
+    return ::grpc::Status(
+        ::grpc::StatusCode::UNAVAILABLE, "Cache not initialized");
+  }
+
+  if (request->key().empty()) {
+    response->set_success(false);
+    response->set_message("Key cannot be empty");
+    return ::grpc::Status(
+        ::grpc::StatusCode::INVALID_ARGUMENT, "Key cannot be empty");
+  }
+
+  int64_t delta = request->delta();
+  if (delta == 0) {
+    delta = 1;
+  }
+
+  uint32_t ttlSeconds = 0;
+  if (request->ttl_seconds() > 0) {
+    ttlSeconds = static_cast<uint32_t>(request->ttl_seconds());
+  }
+
+  auto result = cacheManager_->decrement(request->key(), delta, ttlSeconds);
+
+  response->set_success(result.success);
+  response->set_new_value(result.newValue);
+  response->set_message(result.message);
+
+  return ::grpc::Status::OK;
+}
+
+::grpc::Status CacheServiceImpl::CompareAndSwap(
+    ::grpc::ServerContext* /*context*/,
+    const ::cachelib::grpc::CompareAndSwapRequest* request,
+    ::cachelib::grpc::CompareAndSwapResponse* response) {
+  if (!cacheManager_->isReady()) {
+    response->set_success(false);
+    response->set_message("Cache not initialized");
+    return ::grpc::Status(
+        ::grpc::StatusCode::UNAVAILABLE, "Cache not initialized");
+  }
+
+  if (request->key().empty()) {
+    response->set_success(false);
+    response->set_message("Key cannot be empty");
+    return ::grpc::Status(
+        ::grpc::StatusCode::INVALID_ARGUMENT, "Key cannot be empty");
+  }
+
+  auto result = cacheManager_->compareAndSwap(
+      request->key(),
+      request->expected_value(),
+      request->new_value(),
+      static_cast<int32_t>(request->ttl_seconds()));
+
+  response->set_success(result.success);
+  response->set_actual_value(result.actualValue);
+
+  if (result.success) {
+    response->set_message("Value swapped successfully");
+  } else {
+    response->set_message("Value mismatch or key not found");
+  }
+
+  return ::grpc::Status::OK;
+}
+
+// =============================================================================
+// TTL Operations
+// =============================================================================
+
+::grpc::Status CacheServiceImpl::GetTTL(
+    ::grpc::ServerContext* /*context*/,
+    const ::cachelib::grpc::GetTTLRequest* request,
+    ::cachelib::grpc::GetTTLResponse* response) {
+  if (!cacheManager_->isReady()) {
+    response->set_found(false);
+    response->set_ttl_seconds(-2);
+    return ::grpc::Status(
+        ::grpc::StatusCode::UNAVAILABLE, "Cache not initialized");
+  }
+
+  if (request->key().empty()) {
+    response->set_found(false);
+    response->set_ttl_seconds(-2);
+    return ::grpc::Status(
+        ::grpc::StatusCode::INVALID_ARGUMENT, "Key cannot be empty");
+  }
+
+  int64_t ttl = cacheManager_->getTTL(request->key());
+
+  response->set_found(ttl != -2);
+  response->set_ttl_seconds(ttl);
+
+  return ::grpc::Status::OK;
+}
+
+::grpc::Status CacheServiceImpl::Touch(
+    ::grpc::ServerContext* /*context*/,
+    const ::cachelib::grpc::TouchRequest* request,
+    ::cachelib::grpc::TouchResponse* response) {
+  if (!cacheManager_->isReady()) {
+    response->set_success(false);
+    response->set_message("Cache not initialized");
+    return ::grpc::Status(
+        ::grpc::StatusCode::UNAVAILABLE, "Cache not initialized");
+  }
+
+  if (request->key().empty()) {
+    response->set_success(false);
+    response->set_message("Key cannot be empty");
+    return ::grpc::Status(
+        ::grpc::StatusCode::INVALID_ARGUMENT, "Key cannot be empty");
+  }
+
+  uint32_t ttlSeconds = 0;
+  if (request->ttl_seconds() > 0) {
+    ttlSeconds = static_cast<uint32_t>(request->ttl_seconds());
+  }
+
+  auto result = cacheManager_->touch(request->key(), ttlSeconds);
+
+  response->set_success(result.success);
+  response->set_message(result.message);
+
+  return ::grpc::Status::OK;
+}
+
+// =============================================================================
+// Key Scanning
+// =============================================================================
+
+::grpc::Status CacheServiceImpl::Scan(
+    ::grpc::ServerContext* /*context*/,
+    const ::cachelib::grpc::ScanRequest* request,
+    ::cachelib::grpc::ScanResponse* response) {
+  if (!cacheManager_->isReady()) {
+    return ::grpc::Status(
+        ::grpc::StatusCode::UNAVAILABLE, "Cache not initialized");
+  }
+
+  auto result = cacheManager_->scan(
+      request->pattern(),
+      request->cursor(),
+      request->count());
+
+  for (const auto& key : result.keys) {
+    response->add_keys(key);
+  }
+  response->set_next_cursor(result.nextCursor);
+  response->set_has_more(result.hasMore);
+
+  return ::grpc::Status::OK;
+}
+
+// =============================================================================
+// Administration
+// =============================================================================
 
 ::grpc::Status CacheServiceImpl::Stats(
     ::grpc::ServerContext* /*context*/,
@@ -224,19 +473,31 @@ CacheServiceImpl::CacheServiceImpl(std::shared_ptr<CacheManager> cacheManager)
 
   auto stats = cacheManager_->getStats();
 
+  // Memory stats
   response->set_total_size(stats.totalSize);
   response->set_used_size(stats.usedSize);
   response->set_item_count(stats.itemCount);
+
+  // Operation stats
   response->set_hit_rate(stats.hitRate);
   response->set_get_count(stats.getCount);
   response->set_hit_count(stats.hitCount);
   response->set_miss_count(stats.missCount);
   response->set_set_count(stats.setCount);
+  response->set_delete_count(stats.deleteCount);
   response->set_eviction_count(stats.evictionCount);
+  response->set_expired_count(stats.expiredCount);
+
+  // NVM stats
   response->set_nvm_enabled(stats.nvmEnabled);
   response->set_nvm_size(stats.nvmSize);
   response->set_nvm_used(stats.nvmUsed);
+  response->set_nvm_hit_count(stats.nvmHitCount);
+  response->set_nvm_miss_count(stats.nvmMissCount);
+
+  // Server stats
   response->set_uptime_seconds(stats.uptimeSeconds);
+  response->set_version(stats.version);
 
   return ::grpc::Status::OK;
 }
@@ -250,6 +511,26 @@ CacheServiceImpl::CacheServiceImpl(std::shared_ptr<CacheManager> cacheManager)
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::system_clock::now().time_since_epoch())
           .count());
+
+  return ::grpc::Status::OK;
+}
+
+::grpc::Status CacheServiceImpl::Flush(
+    ::grpc::ServerContext* /*context*/,
+    const ::cachelib::grpc::FlushRequest* /*request*/,
+    ::cachelib::grpc::FlushResponse* response) {
+  if (!cacheManager_->isReady()) {
+    response->set_success(false);
+    response->set_message("Cache not initialized");
+    return ::grpc::Status(
+        ::grpc::StatusCode::UNAVAILABLE, "Cache not initialized");
+  }
+
+  int64_t removed = cacheManager_->flush();
+
+  response->set_success(true);
+  response->set_items_removed(removed);
+  response->set_message("Flush operation completed (note: may require restart for full effect)");
 
   return ::grpc::Status::OK;
 }
