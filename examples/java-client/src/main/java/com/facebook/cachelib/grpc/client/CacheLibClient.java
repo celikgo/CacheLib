@@ -32,17 +32,35 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
- * CacheLibClient provides a simple Java client for the CacheLib gRPC server.
+ * CacheLibClient provides a comprehensive Java client for the CacheLib gRPC server.
  *
- * <p>This client supports basic cache operations like Get, Set, Delete, and
- * advanced operations like MultiGet and Stats retrieval.
+ * <p>This client supports:
+ * <ul>
+ *   <li>Basic operations: Get, Set, Delete, Exists</li>
+ *   <li>Batch operations: MultiGet, MultiSet</li>
+ *   <li>Atomic operations: SetNX (distributed locks), Increment, Decrement, CompareAndSwap</li>
+ *   <li>TTL operations: GetTTL, Touch</li>
+ *   <li>Administration: Stats, Ping, Scan, Flush</li>
+ * </ul>
  *
  * <p>Example usage:
  * <pre>{@code
  * try (CacheLibClient client = new CacheLibClient("localhost", 50051)) {
+ *     // Basic operations
  *     client.set("key", "value", 3600);  // TTL of 1 hour
  *     Optional<byte[]> value = client.get("key");
- *     client.delete("key");
+ *
+ *     // Distributed locking with SetNX
+ *     SetNXResult lock = client.setNX("lock:resource", "owner-123", 30);
+ *     if (lock.wasSet()) {
+ *         // Acquired lock
+ *     }
+ *
+ *     // Rate limiting with Increment
+ *     IncrementResult count = client.increment("rate:user:123", 1, 60);
+ *     if (count.getNewValue() > 100) {
+ *         // Rate limit exceeded
+ *     }
  * }
  * }</pre>
  */
@@ -76,6 +94,10 @@ public class CacheLibClient implements AutoCloseable {
         this.futureStub = CacheServiceGrpc.newFutureStub(channel);
         logger.info("CacheLibClient created");
     }
+
+    // =========================================================================
+    // Basic Operations
+    // =========================================================================
 
     /**
      * Gets a value from the cache.
@@ -240,6 +262,10 @@ public class CacheLibClient implements AutoCloseable {
         }
     }
 
+    // =========================================================================
+    // Batch Operations
+    // =========================================================================
+
     /**
      * Gets multiple values from the cache in a single call.
      *
@@ -309,6 +335,315 @@ public class CacheLibClient implements AutoCloseable {
         }
     }
 
+    // =========================================================================
+    // Atomic Operations
+    // =========================================================================
+
+    /**
+     * Sets a value only if the key doesn't exist (Set if Not eXists).
+     * Useful for distributed locks and idempotent operations.
+     *
+     * <p>Example - Distributed Lock:
+     * <pre>{@code
+     * SetNXResult result = client.setNX("lock:resource", "owner-123", 30);
+     * if (result.wasSet()) {
+     *     try {
+     *         // Do work while holding the lock
+     *     } finally {
+     *         client.delete("lock:resource");
+     *     }
+     * } else {
+     *     // Lock is held by another owner
+     * }
+     * }</pre>
+     *
+     * @param key        the key to set
+     * @param value      the value to store
+     * @param ttlSeconds time-to-live in seconds (0 = no expiration)
+     * @return SetNXResult indicating if the key was set
+     */
+    public SetNXResult setNX(String key, byte[] value, long ttlSeconds) {
+        logger.debug("SETNX key={} ttl={}", key, ttlSeconds);
+        try {
+            SetNXRequest request = SetNXRequest.newBuilder()
+                    .setKey(key)
+                    .setValue(ByteString.copyFrom(value))
+                    .setTtlSeconds(ttlSeconds)
+                    .build();
+            SetNXResponse response = blockingStub.setNX(request);
+
+            return new SetNXResult(
+                    response.getWasSet(),
+                    response.getExistingValue().toByteArray(),
+                    response.getMessage()
+            );
+        } catch (StatusRuntimeException e) {
+            logger.error("SETNX failed for key={}: {}", key, e.getStatus());
+            throw new CacheLibException("SETNX failed: " + e.getStatus(), e);
+        }
+    }
+
+    /**
+     * Sets a string value only if the key doesn't exist.
+     *
+     * @param key        the key to set
+     * @param value      the string value to store
+     * @param ttlSeconds time-to-live in seconds
+     * @return SetNXResult indicating if the key was set
+     */
+    public SetNXResult setNX(String key, String value, long ttlSeconds) {
+        return setNX(key, value.getBytes(StandardCharsets.UTF_8), ttlSeconds);
+    }
+
+    /**
+     * Atomically increments a numeric value stored at key.
+     * If the key doesn't exist, it's created with value = delta.
+     *
+     * <p>Example - Rate Limiting:
+     * <pre>{@code
+     * String rateLimitKey = "rate:user:" + userId;
+     * IncrementResult result = client.increment(rateLimitKey, 1, 60); // 60 second window
+     * if (result.getNewValue() > 100) {
+     *     throw new RateLimitExceededException();
+     * }
+     * }</pre>
+     *
+     * @param key        the key to increment
+     * @param delta      the amount to add (default: 1)
+     * @param ttlSeconds time-to-live in seconds for new keys
+     * @return IncrementResult with the new value
+     */
+    public IncrementResult increment(String key, long delta, long ttlSeconds) {
+        logger.debug("INCR key={} delta={} ttl={}", key, delta, ttlSeconds);
+        try {
+            IncrementRequest request = IncrementRequest.newBuilder()
+                    .setKey(key)
+                    .setDelta(delta)
+                    .setTtlSeconds(ttlSeconds)
+                    .build();
+            IncrementResponse response = blockingStub.increment(request);
+
+            return new IncrementResult(
+                    response.getSuccess(),
+                    response.getNewValue(),
+                    response.getMessage()
+            );
+        } catch (StatusRuntimeException e) {
+            logger.error("INCR failed for key={}: {}", key, e.getStatus());
+            throw new CacheLibException("INCR failed: " + e.getStatus(), e);
+        }
+    }
+
+    /**
+     * Increments by 1 with no TTL.
+     *
+     * @param key the key to increment
+     * @return IncrementResult with the new value
+     */
+    public IncrementResult increment(String key) {
+        return increment(key, 1, 0);
+    }
+
+    /**
+     * Atomically decrements a numeric value stored at key.
+     * If the key doesn't exist, it's created with value = -delta.
+     *
+     * @param key        the key to decrement
+     * @param delta      the amount to subtract (default: 1)
+     * @param ttlSeconds time-to-live in seconds for new keys
+     * @return IncrementResult with the new value
+     */
+    public IncrementResult decrement(String key, long delta, long ttlSeconds) {
+        logger.debug("DECR key={} delta={} ttl={}", key, delta, ttlSeconds);
+        try {
+            DecrementRequest request = DecrementRequest.newBuilder()
+                    .setKey(key)
+                    .setDelta(delta)
+                    .setTtlSeconds(ttlSeconds)
+                    .build();
+            DecrementResponse response = blockingStub.decrement(request);
+
+            return new IncrementResult(
+                    response.getSuccess(),
+                    response.getNewValue(),
+                    response.getMessage()
+            );
+        } catch (StatusRuntimeException e) {
+            logger.error("DECR failed for key={}: {}", key, e.getStatus());
+            throw new CacheLibException("DECR failed: " + e.getStatus(), e);
+        }
+    }
+
+    /**
+     * Decrements by 1 with no TTL.
+     *
+     * @param key the key to decrement
+     * @return IncrementResult with the new value
+     */
+    public IncrementResult decrement(String key) {
+        return decrement(key, 1, 0);
+    }
+
+    /**
+     * Atomically updates a value if it matches the expected value.
+     * Useful for optimistic locking patterns.
+     *
+     * <p>Example - Optimistic Locking:
+     * <pre>{@code
+     * CacheEntry entry = client.getWithTtl("version");
+     * String currentVersion = entry.getValueAsString();
+     * String newVersion = computeNewVersion(currentVersion);
+     *
+     * CompareAndSwapResult result = client.compareAndSwap(
+     *     "version", currentVersion, newVersion, 0);
+     * if (!result.wasSwapped()) {
+     *     // Another client updated the value, retry
+     * }
+     * }</pre>
+     *
+     * @param key           the key to update
+     * @param expectedValue the expected current value
+     * @param newValue      the new value to set
+     * @param ttlSeconds    TTL (0 = keep existing, -1 = no expiration)
+     * @return CompareAndSwapResult indicating if the swap succeeded
+     */
+    public CompareAndSwapResult compareAndSwap(String key, byte[] expectedValue,
+                                                byte[] newValue, long ttlSeconds) {
+        logger.debug("CAS key={}", key);
+        try {
+            CompareAndSwapRequest request = CompareAndSwapRequest.newBuilder()
+                    .setKey(key)
+                    .setExpectedValue(ByteString.copyFrom(expectedValue))
+                    .setNewValue(ByteString.copyFrom(newValue))
+                    .setTtlSeconds(ttlSeconds)
+                    .build();
+            CompareAndSwapResponse response = blockingStub.compareAndSwap(request);
+
+            return new CompareAndSwapResult(
+                    response.getSuccess(),
+                    response.getActualValue().toByteArray(),
+                    response.getMessage()
+            );
+        } catch (StatusRuntimeException e) {
+            logger.error("CAS failed for key={}: {}", key, e.getStatus());
+            throw new CacheLibException("CAS failed: " + e.getStatus(), e);
+        }
+    }
+
+    /**
+     * Compare and swap with string values.
+     */
+    public CompareAndSwapResult compareAndSwap(String key, String expectedValue,
+                                                String newValue, long ttlSeconds) {
+        return compareAndSwap(
+                key,
+                expectedValue.getBytes(StandardCharsets.UTF_8),
+                newValue.getBytes(StandardCharsets.UTF_8),
+                ttlSeconds
+        );
+    }
+
+    // =========================================================================
+    // TTL Operations
+    // =========================================================================
+
+    /**
+     * Gets the remaining TTL for a key without retrieving the value.
+     * Useful for monitoring cache freshness and implementing cache warming.
+     *
+     * @param key the key to check
+     * @return TTL in seconds: -2 = not found, -1 = no expiration, 0+ = seconds remaining
+     */
+    public long getTTL(String key) {
+        logger.debug("TTL key={}", key);
+        try {
+            GetTTLRequest request = GetTTLRequest.newBuilder()
+                    .setKey(key)
+                    .build();
+            GetTTLResponse response = blockingStub.getTTL(request);
+            return response.getTtlSeconds();
+        } catch (StatusRuntimeException e) {
+            logger.error("TTL failed for key={}: {}", key, e.getStatus());
+            throw new CacheLibException("TTL failed: " + e.getStatus(), e);
+        }
+    }
+
+    /**
+     * Updates the TTL of a key without changing its value.
+     * Useful for sliding window expiration and session extension.
+     *
+     * <p>Example - Session Extension:
+     * <pre>{@code
+     * // Extend session by 30 minutes on each request
+     * if (client.touch("session:" + sessionId, 1800)) {
+     *     // Session extended
+     * } else {
+     *     // Session not found, redirect to login
+     * }
+     * }</pre>
+     *
+     * @param key        the key to touch
+     * @param ttlSeconds new TTL in seconds (0 = remove expiration)
+     * @return true if the key exists and TTL was updated
+     */
+    public boolean touch(String key, long ttlSeconds) {
+        logger.debug("TOUCH key={} ttl={}", key, ttlSeconds);
+        try {
+            TouchRequest request = TouchRequest.newBuilder()
+                    .setKey(key)
+                    .setTtlSeconds(ttlSeconds)
+                    .build();
+            TouchResponse response = blockingStub.touch(request);
+            return response.getSuccess();
+        } catch (StatusRuntimeException e) {
+            logger.error("TOUCH failed for key={}: {}", key, e.getStatus());
+            throw new CacheLibException("TOUCH failed: " + e.getStatus(), e);
+        }
+    }
+
+    // =========================================================================
+    // Administration
+    // =========================================================================
+
+    /**
+     * Scans keys matching a pattern with pagination.
+     * Useful for debugging and cache inspection.
+     *
+     * <p>Note: This operation may be slow on large caches.
+     *
+     * @param pattern the pattern to match (supports * as wildcard)
+     * @param cursor  cursor from previous call (empty for first call)
+     * @param count   maximum keys to return (default: 100)
+     * @return ScanResult with matching keys and cursor for next page
+     */
+    public ScanResult scan(String pattern, String cursor, int count) {
+        logger.debug("SCAN pattern={} cursor={} count={}", pattern, cursor, count);
+        try {
+            ScanRequest request = ScanRequest.newBuilder()
+                    .setPattern(pattern)
+                    .setCursor(cursor)
+                    .setCount(count)
+                    .build();
+            ScanResponse response = blockingStub.scan(request);
+
+            return new ScanResult(
+                    response.getKeysList(),
+                    response.getNextCursor(),
+                    response.getHasMore()
+            );
+        } catch (StatusRuntimeException e) {
+            logger.error("SCAN failed: {}", e.getStatus());
+            throw new CacheLibException("SCAN failed: " + e.getStatus(), e);
+        }
+    }
+
+    /**
+     * Scans all keys matching a pattern.
+     */
+    public ScanResult scan(String pattern) {
+        return scan(pattern, "", 100);
+    }
+
     /**
      * Gets cache statistics.
      *
@@ -331,11 +666,15 @@ public class CacheLibClient implements AutoCloseable {
                     response.getHitCount(),
                     response.getMissCount(),
                     response.getSetCount(),
+                    response.getDeleteCount(),
                     response.getEvictionCount(),
                     response.getNvmEnabled(),
                     response.getNvmSize(),
                     response.getNvmUsed(),
-                    response.getUptimeSeconds()
+                    response.getNvmHitCount(),
+                    response.getNvmMissCount(),
+                    response.getUptimeSeconds(),
+                    response.getVersion()
             );
         } catch (StatusRuntimeException e) {
             logger.error("STATS failed: {}", e.getStatus());
@@ -361,6 +700,40 @@ public class CacheLibClient implements AutoCloseable {
         }
     }
 
+    /**
+     * Flushes all keys from the cache.
+     * Use with caution - this operation cannot be undone.
+     *
+     * @return number of items removed
+     */
+    public long flush() {
+        return flush(false);
+    }
+
+    /**
+     * Flushes all keys from the cache.
+     *
+     * @param includeNvm if true, also clear NVM cache
+     * @return number of items removed
+     */
+    public long flush(boolean includeNvm) {
+        logger.warn("FLUSH includeNvm={}", includeNvm);
+        try {
+            FlushRequest request = FlushRequest.newBuilder()
+                    .setIncludeNvm(includeNvm)
+                    .build();
+            FlushResponse response = blockingStub.flush(request);
+
+            if (!response.getSuccess()) {
+                logger.error("FLUSH failed: {}", response.getMessage());
+            }
+            return response.getItemsRemoved();
+        } catch (StatusRuntimeException e) {
+            logger.error("FLUSH failed: {}", e.getStatus());
+            throw new CacheLibException("FLUSH failed: " + e.getStatus(), e);
+        }
+    }
+
     @Override
     public void close() {
         logger.info("Closing CacheLibClient");
@@ -372,6 +745,10 @@ public class CacheLibClient implements AutoCloseable {
             Thread.currentThread().interrupt();
         }
     }
+
+    // =========================================================================
+    // Result Classes
+    // =========================================================================
 
     /**
      * Represents a cache entry with value and TTL information.
@@ -403,6 +780,126 @@ public class CacheLibClient implements AutoCloseable {
     }
 
     /**
+     * Result of a SetNX operation.
+     */
+    public static class SetNXResult {
+        private final boolean wasSet;
+        private final byte[] existingValue;
+        private final String message;
+
+        public SetNXResult(boolean wasSet, byte[] existingValue, String message) {
+            this.wasSet = wasSet;
+            this.existingValue = existingValue;
+            this.message = message;
+        }
+
+        /** Returns true if the key was set (didn't exist before) */
+        public boolean wasSet() {
+            return wasSet;
+        }
+
+        /** Returns the existing value if wasSet=false */
+        public byte[] getExistingValue() {
+            return existingValue;
+        }
+
+        public String getExistingValueAsString() {
+            return existingValue != null ? new String(existingValue, StandardCharsets.UTF_8) : null;
+        }
+
+        public String getMessage() {
+            return message;
+        }
+    }
+
+    /**
+     * Result of an Increment or Decrement operation.
+     */
+    public static class IncrementResult {
+        private final boolean success;
+        private final long newValue;
+        private final String message;
+
+        public IncrementResult(boolean success, long newValue, String message) {
+            this.success = success;
+            this.newValue = newValue;
+            this.message = message;
+        }
+
+        public boolean isSuccess() {
+            return success;
+        }
+
+        public long getNewValue() {
+            return newValue;
+        }
+
+        public String getMessage() {
+            return message;
+        }
+    }
+
+    /**
+     * Result of a CompareAndSwap operation.
+     */
+    public static class CompareAndSwapResult {
+        private final boolean success;
+        private final byte[] actualValue;
+        private final String message;
+
+        public CompareAndSwapResult(boolean success, byte[] actualValue, String message) {
+            this.success = success;
+            this.actualValue = actualValue;
+            this.message = message;
+        }
+
+        /** Returns true if the swap was performed */
+        public boolean wasSwapped() {
+            return success;
+        }
+
+        /** Returns the actual value (useful if swap failed) */
+        public byte[] getActualValue() {
+            return actualValue;
+        }
+
+        public String getActualValueAsString() {
+            return actualValue != null ? new String(actualValue, StandardCharsets.UTF_8) : null;
+        }
+
+        public String getMessage() {
+            return message;
+        }
+    }
+
+    /**
+     * Result of a Scan operation.
+     */
+    public static class ScanResult {
+        private final List<String> keys;
+        private final String nextCursor;
+        private final boolean hasMore;
+
+        public ScanResult(List<String> keys, String nextCursor, boolean hasMore) {
+            this.keys = keys;
+            this.nextCursor = nextCursor;
+            this.hasMore = hasMore;
+        }
+
+        public List<String> getKeys() {
+            return keys;
+        }
+
+        public String getNextCursor() {
+            return nextCursor;
+        }
+
+        public boolean hasMore() {
+            return hasMore;
+        }
+    }
+
+    /**
      * Represents cache statistics.
      */
     public static class CacheStats {
@@ -414,17 +911,22 @@ public class CacheLibClient implements AutoCloseable {
         private final long hitCount;
         private final long missCount;
         private final long setCount;
+        private final long deleteCount;
         private final long evictionCount;
         private final boolean nvmEnabled;
         private final long nvmSize;
         private final long nvmUsed;
+        private final long nvmHitCount;
+        private final long nvmMissCount;
         private final long uptimeSeconds;
+        private final String version;
 
         public CacheStats(long totalSize, long usedSize, long itemCount,
                          double hitRate, long getCount, long hitCount,
-                         long missCount, long setCount, long evictionCount,
-                         boolean nvmEnabled, long nvmSize, long nvmUsed,
-                         long uptimeSeconds) {
+                         long missCount, long setCount, long deleteCount,
+                         long evictionCount, boolean nvmEnabled, long nvmSize,
+                         long nvmUsed, long nvmHitCount, long nvmMissCount,
+                         long uptimeSeconds, String version) {
             this.totalSize = totalSize;
             this.usedSize = usedSize;
             this.itemCount = itemCount;
@@ -433,11 +935,15 @@ public class CacheLibClient implements AutoCloseable {
             this.hitCount = hitCount;
             this.missCount = missCount;
             this.setCount = setCount;
+            this.deleteCount = deleteCount;
             this.evictionCount = evictionCount;
             this.nvmEnabled = nvmEnabled;
             this.nvmSize = nvmSize;
             this.nvmUsed = nvmUsed;
+            this.nvmHitCount = nvmHitCount;
+            this.nvmMissCount = nvmMissCount;
             this.uptimeSeconds = uptimeSeconds;
+            this.version = version;
         }
 
         // Getters
@@ -449,20 +955,24 @@ public class CacheLibClient implements AutoCloseable {
         public long getHitCount() { return hitCount; }
         public long getMissCount() { return missCount; }
         public long getSetCount() { return setCount; }
+        public long getDeleteCount() { return deleteCount; }
         public long getEvictionCount() { return evictionCount; }
         public boolean isNvmEnabled() { return nvmEnabled; }
         public long getNvmSize() { return nvmSize; }
         public long getNvmUsed() { return nvmUsed; }
+        public long getNvmHitCount() { return nvmHitCount; }
+        public long getNvmMissCount() { return nvmMissCount; }
         public long getUptimeSeconds() { return uptimeSeconds; }
+        public String getVersion() { return version; }
 
         @Override
         public String toString() {
             return String.format(
-                    "CacheStats{totalSize=%d, usedSize=%d, itemCount=%d, " +
-                    "hitRate=%.2f%%, gets=%d, hits=%d, misses=%d, sets=%d, " +
+                    "CacheStats{version=%s, totalSize=%d, usedSize=%d, itemCount=%d, " +
+                    "hitRate=%.2f%%, gets=%d, hits=%d, misses=%d, sets=%d, deletes=%d, " +
                     "evictions=%d, nvmEnabled=%s, uptime=%ds}",
-                    totalSize, usedSize, itemCount, hitRate * 100,
-                    getCount, hitCount, missCount, setCount,
+                    version, totalSize, usedSize, itemCount, hitRate * 100,
+                    getCount, hitCount, missCount, setCount, deleteCount,
                     evictionCount, nvmEnabled, uptimeSeconds
             );
         }

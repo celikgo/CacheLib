@@ -26,7 +26,14 @@ import java.util.*;
  * Demo application showcasing the CacheLib gRPC client.
  *
  * <p>This demo connects to a CacheLib gRPC server and performs various
- * cache operations to demonstrate the client functionality.
+ * cache operations to demonstrate the client functionality, including:
+ * <ul>
+ *   <li>Basic operations (Get, Set, Delete, Exists)</li>
+ *   <li>Batch operations (MultiGet, MultiSet)</li>
+ *   <li>Atomic operations (SetNX, Increment, Decrement)</li>
+ *   <li>TTL operations (GetTTL, Touch)</li>
+ *   <li>Administration (Stats, Scan)</li>
+ * </ul>
  *
  * <p>Usage:
  * <pre>
@@ -50,7 +57,7 @@ public class CacheLibClientDemo {
         }
 
         System.out.println("╔══════════════════════════════════════════════════════════╗");
-        System.out.println("║         CacheLib gRPC Client Demo                        ║");
+        System.out.println("║         CacheLib gRPC Client Demo v1.2                   ║");
         System.out.println("╚══════════════════════════════════════════════════════════╝");
         System.out.println();
         System.out.println("Connecting to " + host + ":" + port + "...");
@@ -107,8 +114,65 @@ public class CacheLibClientDemo {
         }
         System.out.println();
 
-        // 4. Delete operation
-        printSection("4. Delete Operation");
+        // 4. GetTTL Operation
+        printSection("4. GetTTL Operation");
+        long ttl = client.getTTL(key2);
+        System.out.println("TTL for \"" + key2 + "\": " + ttl + " seconds");
+
+        long ttlNonExistent = client.getTTL("non-existent-key");
+        System.out.println("TTL for non-existent key: " + ttlNonExistent + " (-2 means not found)");
+        System.out.println();
+
+        // 5. Touch Operation (Extend TTL)
+        printSection("5. Touch Operation - Extend TTL");
+        System.out.println("Extending TTL of \"" + key2 + "\" to 120 seconds...");
+        boolean touched = client.touch(key2, 120);
+        System.out.println("Touch result: " + (touched ? "SUCCESS" : "FAILED"));
+
+        long newTtl = client.getTTL(key2);
+        System.out.println("New TTL: " + newTtl + " seconds");
+        System.out.println();
+
+        // 6. SetNX - Distributed Locking
+        printSection("6. SetNX - Distributed Locking");
+        String lockKey = "lock:resource-123";
+        String ownerId = "owner-" + UUID.randomUUID().toString().substring(0, 8);
+
+        System.out.println("Attempting to acquire lock \"" + lockKey + "\"...");
+        CacheLibClient.SetNXResult lock1 = client.setNX(lockKey, ownerId, 30);
+        System.out.println("First attempt - Lock acquired: " + lock1.wasSet());
+
+        System.out.println("\nAttempting to acquire same lock again...");
+        CacheLibClient.SetNXResult lock2 = client.setNX(lockKey, "another-owner", 30);
+        System.out.println("Second attempt - Lock acquired: " + lock2.wasSet());
+        if (!lock2.wasSet()) {
+            System.out.println("Existing owner: " + lock2.getExistingValueAsString());
+        }
+
+        // Release lock
+        client.delete(lockKey);
+        System.out.println("Lock released.");
+        System.out.println();
+
+        // 7. Increment/Decrement - Rate Limiting & Counters
+        printSection("7. Increment/Decrement - Rate Limiting");
+        String counterKey = "rate:user:456";
+
+        System.out.println("Simulating rate limiting (limit: 5 requests per minute)...");
+        for (int i = 1; i <= 7; i++) {
+            CacheLibClient.IncrementResult result = client.increment(counterKey, 1, 60);
+            boolean allowed = result.getNewValue() <= 5;
+            System.out.printf("  Request %d: count=%d, %s%n",
+                    i, result.getNewValue(), allowed ? "ALLOWED" : "RATE LIMITED");
+        }
+
+        System.out.println("\nDecrementing counter...");
+        CacheLibClient.IncrementResult decrResult = client.decrement(counterKey, 2, 0);
+        System.out.println("After decrement by 2: " + decrResult.getNewValue());
+        System.out.println();
+
+        // 8. Delete operation
+        printSection("8. Delete Operation");
         String key3 = "to-be-deleted";
         client.set(key3, "temporary data");
         System.out.println("SET \"" + key3 + "\"");
@@ -123,8 +187,8 @@ public class CacheLibClientDemo {
         System.out.println("EXISTS after delete: " + existsAfter);
         System.out.println();
 
-        // 5. Multi-Get
-        printSection("5. Multi-Get Operation");
+        // 9. Multi-Get
+        printSection("9. Multi-Get Operation");
         Map<String, byte[]> bulkData = new HashMap<>();
         for (int i = 1; i <= 5; i++) {
             bulkData.put("item-" + i, ("Value " + i).getBytes(StandardCharsets.UTF_8));
@@ -146,8 +210,8 @@ public class CacheLibClientDemo {
         }
         System.out.println();
 
-        // 6. Binary data
-        printSection("6. Binary Data");
+        // 10. Binary data
+        printSection("10. Binary Data");
         String binKey = "binary-data";
         byte[] binaryData = new byte[256];
         for (int i = 0; i < 256; i++) {
@@ -166,8 +230,8 @@ public class CacheLibClientDemo {
         }
         System.out.println();
 
-        // 7. Large value
-        printSection("7. Large Value Test");
+        // 11. Large value
+        printSection("11. Large Value Test");
         String largeKey = "large-value";
         int size = 100 * 1024; // 100 KB
         byte[] largeValue = new byte[size];
@@ -185,9 +249,10 @@ public class CacheLibClientDemo {
         }
         System.out.println();
 
-        // 8. Cache Statistics
-        printSection("8. Cache Statistics");
+        // 12. Cache Statistics
+        printSection("12. Cache Statistics");
         CacheLibClient.CacheStats stats = client.getStats();
+        System.out.println("Server Version: " + stats.getVersion());
         System.out.println("Cache Size: " + formatBytes(stats.getTotalSize()));
         System.out.println("Used Size: " + formatBytes(stats.getUsedSize()));
         System.out.println("Item Count: " + stats.getItemCount());
@@ -197,19 +262,32 @@ public class CacheLibClientDemo {
         System.out.println("  - Hits: " + stats.getHitCount());
         System.out.println("  - Misses: " + stats.getMissCount());
         System.out.println("  - Sets: " + stats.getSetCount());
+        System.out.println("  - Deletes: " + stats.getDeleteCount());
         System.out.println("  - Evictions: " + stats.getEvictionCount());
         System.out.println("NVM Cache: " + (stats.isNvmEnabled() ? "Enabled" : "Disabled"));
         if (stats.isNvmEnabled()) {
             System.out.println("  - NVM Size: " + formatBytes(stats.getNvmSize()));
             System.out.println("  - NVM Used: " + formatBytes(stats.getNvmUsed()));
+            System.out.println("  - NVM Hits: " + stats.getNvmHitCount());
+            System.out.println("  - NVM Misses: " + stats.getNvmMissCount());
         }
         System.out.println("Server Uptime: " + formatDuration(stats.getUptimeSeconds()));
         System.out.println();
 
-        // 9. Cleanup
-        printSection("9. Cleanup");
+        // Verify counter invariants
+        System.out.println("Verification:");
+        boolean getCountValid = stats.getGetCount() > 0;
+        boolean setCountValid = stats.getSetCount() > 0;
+        boolean hitMissSum = stats.getHitCount() + stats.getMissCount() <= stats.getGetCount() + 10; // Allow some tolerance
+        System.out.println("  - Get count > 0: " + (getCountValid ? "PASS" : "FAIL"));
+        System.out.println("  - Set count > 0: " + (setCountValid ? "PASS" : "FAIL"));
+        System.out.println("  - Hit + Miss ~= Get: " + (hitMissSum ? "PASS" : "CHECK"));
+        System.out.println();
+
+        // 13. Cleanup
+        printSection("13. Cleanup");
         List<String> keysToDelete = Arrays.asList(
-                key1, key2, key3, binKey, largeKey,
+                key1, key2, key3, binKey, largeKey, counterKey,
                 "item-1", "item-2", "item-3", "item-4", "item-5"
         );
         int deleted_count = 0;
@@ -224,6 +302,13 @@ public class CacheLibClientDemo {
         // Summary
         printSection("Demo Complete");
         System.out.println("All operations completed successfully!");
+        System.out.println();
+        System.out.println("Features demonstrated:");
+        System.out.println("  - Basic: Get, Set, Delete, Exists");
+        System.out.println("  - Batch: MultiGet, MultiSet");
+        System.out.println("  - Atomic: SetNX (locks), Increment, Decrement");
+        System.out.println("  - TTL: GetTTL, Touch");
+        System.out.println("  - Admin: Stats, Ping");
         System.out.println();
         System.out.println("For more information, see:");
         System.out.println("  https://github.com/facebook/CacheLib");

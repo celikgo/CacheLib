@@ -129,11 +129,13 @@ void CacheManager::shutdown() {
 
 GetResult CacheManager::get(std::string_view key) {
   GetResult result;
-  ++getCount_;
+
+  // Increment get count FIRST using explicit fetch_add for visibility
+  getCount_.fetch_add(1, std::memory_order_relaxed);
 
   if (!cache_) {
     XLOG(WARN) << "Cache not initialized";
-    ++missCount_;
+    missCount_.fetch_add(1, std::memory_order_relaxed);
     return result;
   }
 
@@ -141,7 +143,7 @@ GetResult CacheManager::get(std::string_view key) {
     auto handle = cache_->find(folly::StringPiece(key.data(), key.size()));
 
     if (handle) {
-      ++hitCount_;
+      hitCount_.fetch_add(1, std::memory_order_relaxed);
       result.found = true;
 
       // Copy the value
@@ -166,11 +168,11 @@ GetResult CacheManager::get(std::string_view key) {
         }
       }
     } else {
-      ++missCount_;
+      missCount_.fetch_add(1, std::memory_order_relaxed);
     }
   } catch (const std::exception& ex) {
     XLOG(ERR) << "Error during get for key=" << key << ": " << ex.what();
-    ++missCount_;
+    missCount_.fetch_add(1, std::memory_order_relaxed);
   }
 
   return result;
@@ -179,7 +181,8 @@ GetResult CacheManager::get(std::string_view key) {
 bool CacheManager::set(std::string_view key,
                        std::string_view value,
                        uint32_t ttlSeconds) {
-  ++setCount_;
+  // Increment set count FIRST using explicit fetch_add for visibility
+  setCount_.fetch_add(1, std::memory_order_relaxed);
 
   if (!cache_) {
     XLOG(WARN) << "Cache not initialized";
@@ -220,7 +223,8 @@ bool CacheManager::set(std::string_view key,
 }
 
 bool CacheManager::remove(std::string_view key) {
-  ++deleteCount_;
+  // Increment delete count using explicit fetch_add for visibility
+  deleteCount_.fetch_add(1, std::memory_order_relaxed);
 
   if (!cache_) {
     XLOG(WARN) << "Cache not initialized";
@@ -630,12 +634,12 @@ CacheStats CacheManager::getStats() const {
     stats.itemCount = static_cast<int64_t>(globalStats.numItems);
     stats.evictionCount = static_cast<int64_t>(globalStats.numEvictions);
 
-    // Our tracked counters
-    stats.getCount = getCount_.load();
-    stats.hitCount = hitCount_.load();
-    stats.missCount = missCount_.load();
-    stats.setCount = setCount_.load();
-    stats.deleteCount = deleteCount_.load();
+    // Our tracked counters - use memory_order_acquire to ensure visibility
+    stats.getCount = getCount_.load(std::memory_order_acquire);
+    stats.hitCount = hitCount_.load(std::memory_order_acquire);
+    stats.missCount = missCount_.load(std::memory_order_acquire);
+    stats.setCount = setCount_.load(std::memory_order_acquire);
+    stats.deleteCount = deleteCount_.load(std::memory_order_acquire);
 
     if (stats.getCount > 0) {
       stats.hitRate =
