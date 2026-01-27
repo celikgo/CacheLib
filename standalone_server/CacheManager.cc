@@ -622,7 +622,7 @@ CacheStats CacheManager::getStats() const {
 
     // Calculate actual used size from pool stats
     auto poolStats = cache_->getPoolStats(defaultPoolId_);
-    stats.usedSize = static_cast<int64_t>(poolStats.poolUsableSize - poolStats.freeMemorySize());
+    stats.usedSize = static_cast<int64_t>(poolStats.poolUsableSize - poolStats.freeMemoryBytes());
     if (stats.usedSize < 0) {
       stats.usedSize = 0;
     }
