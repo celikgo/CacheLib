@@ -1,96 +1,197 @@
-# CacheLib gRPC Server
+# CacheLib gRPC Server v1.2.1
 
-A standalone, Dockerized gRPC server that wraps Facebook's CacheLib library, providing a Redis-like cache service accessible from any language via gRPC.
-
-## Overview
-
-This project extends CacheLib to run as a standalone network service, similar to how Redis or Memcached work. Instead of embedding CacheLib directly in your application, you can deploy it as a container and connect from any language with gRPC support (Java, Python, Go, Node.js, etc.).
-
-### Key Features
-
-- **Redis-like interface**: Get, Set, Delete operations with optional TTL
-- **High performance**: Built on CacheLib's battle-tested caching engine
-- **Hybrid caching**: Supports DRAM + NVM (flash/SSD) caching
-- **Production-ready**: Comprehensive logging, error handling, and health checks
-- **Multi-language support**: Any language with gRPC support can be a client
-- **Docker-native**: Easy deployment as a container
-
-### Trade-offs
-
-| Consideration | In-Process CacheLib | gRPC Server |
-|---------------|---------------------|-------------|
-| Latency | Sub-microsecond | ~100us-1ms (network) |
-| Throughput | Millions ops/sec | 100K+ ops/sec |
-| Language Support | C++ only | Any with gRPC |
-| Deployment | Library dependency | Separate service |
-| Scaling | Per-process | Horizontal |
-| Memory Sharing | Direct access | Serialization required |
-
-Use the gRPC server when:
-- You need caching from non-C++ applications
-- You want to share cache across multiple services
-- You need independent cache service scaling
-- You prefer operational simplicity over raw performance
+A high-performance, Redis-compatible caching server powered by [CacheLib](https://github.com/facebook/CacheLib) with gRPC interface.
 
 ## Quick Start
 
-### Using Docker (Recommended)
+### Using Pre-built Docker Image (Recommended)
 
 ```bash
-# Build the image
-cd CacheLib
-docker build -f standalone_server/Dockerfile -t cachelib-grpc-server .
+# Pull the latest image
+docker pull ghcr.io/celikgo/cachelib-grpc-server:1.2.1
 
-# Run with default settings (1GB DRAM cache)
-docker run -d -p 50051:50051 --name cachelib-server cachelib-grpc-server
+# Run the server (1GB RAM cache)
+docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.2.1
 
 # Run with custom cache size (4GB)
-docker run -d -p 50051:50051 cachelib-grpc-server \
+docker run -d --name cachelib -p 50051:50051 \
+  ghcr.io/celikgo/cachelib-grpc-server:1.2.1 \
   --cache_size=4294967296
 
 # Run with hybrid caching (DRAM + SSD)
-docker run -d -p 50051:50051 \
+docker run -d --name cachelib -p 50051:50051 \
   -v /path/to/ssd:/data/nvm \
-  cachelib-grpc-server \
+  ghcr.io/celikgo/cachelib-grpc-server:1.2.1 \
   --cache_size=2147483648 \
   --enable_nvm=true \
   --nvm_path=/data/nvm/cache.dat \
   --nvm_size=10737418240
 ```
 
-### Using Docker Compose
+### Verify Installation
 
 ```bash
-cd standalone_server
-docker-compose up -d
+# Health check
+grpcurl -plaintext localhost:50051 cachelib.grpc.CacheService/Ping
 
-# Or with NVM support
-docker-compose --profile nvm up -d
+# Response: {"message":"PONG","timestamp":"1706000000000"}
 ```
 
-### Building from Source
+## Features
+
+### Core Operations
+| Operation | Description |
+|-----------|-------------|
+| **Set** | Store key-value with optional TTL |
+| **Get** | Retrieve value by key |
+| **Delete** | Remove key from cache |
+| **Exists** | Check if key exists |
+| **MultiGet** | Batch retrieve multiple keys |
+| **MultiSet** | Batch store multiple key-values |
+
+### Redis-Parity Features (v1.2.0+)
+| Feature | Description | Use Case |
+|---------|-------------|----------|
+| **GetTTL** | Check remaining TTL | Cache monitoring |
+| **SetNX** | Set if not exists | Distributed locks |
+| **Increment** | Atomic add | Rate limiting, counters |
+| **Decrement** | Atomic subtract | Counters |
+| **Touch** | Update TTL only | Session extension |
+| **CompareAndSwap** | Conditional update | Optimistic locking |
+
+### Administration
+| Operation | Description |
+|-----------|-------------|
+| **Ping** | Health check |
+| **Stats** | Cache statistics and metrics |
+| **Flush** | Clear all keys |
+
+## API Examples
+
+### Basic Operations
 
 ```bash
-# 1. Build CacheLib dependencies
-cd CacheLib
-./contrib/build.sh -j -d deps
+# SET with TTL (60 seconds)
+grpcurl -plaintext -d '{"key":"user:123","value":"eyJuYW1lIjoiSm9obiJ9","ttl_seconds":60}' \
+  localhost:50051 cachelib.grpc.CacheService/Set
 
-# 2. Build CacheLib
-./contrib/build.sh -j -d cachelib
+# GET
+grpcurl -plaintext -d '{"key":"user:123"}' \
+  localhost:50051 cachelib.grpc.CacheService/Get
 
-# 3. Install gRPC (v1.60.0 recommended)
-# Follow https://grpc.io/docs/languages/cpp/quickstart/
+# DELETE
+grpcurl -plaintext -d '{"key":"user:123"}' \
+  localhost:50051 cachelib.grpc.CacheService/Delete
 
-# 4. Build the gRPC server
-cd standalone_server
-mkdir build && cd build
-cmake -DCMAKE_PREFIX_PATH="$PWD/../../opt/cachelib" \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DBUILD_TESTS=ON ..
-make -j
+# EXISTS
+grpcurl -plaintext -d '{"key":"user:123"}' \
+  localhost:50051 cachelib.grpc.CacheService/Exists
 
-# 5. Run the server
-./cachelib-grpc-server --port=50051 --cache_size=1073741824
+# PING
+grpcurl -plaintext localhost:50051 cachelib.grpc.CacheService/Ping
+```
+
+### Distributed Locking (SetNX)
+
+```bash
+# Acquire lock (returns wasSet: true if successful)
+grpcurl -plaintext -d '{"key":"lock:order:456","value":"d29ya2VyLTE=","ttl_seconds":30}' \
+  localhost:50051 cachelib.grpc.CacheService/SetNX
+
+# Response if lock acquired:
+# {"wasSet": true, "message": "Key set successfully"}
+
+# Response if lock already held:
+# {"wasSet": false, "existingValue": "d29ya2VyLTE=", "message": "Key already exists"}
+
+# Release lock
+grpcurl -plaintext -d '{"key":"lock:order:456"}' \
+  localhost:50051 cachelib.grpc.CacheService/Delete
+```
+
+### Rate Limiting (Increment)
+
+```bash
+# Increment counter (creates with value=1 if not exists)
+grpcurl -plaintext -d '{"key":"rate:api:user:789","delta":1,"ttl_seconds":60}' \
+  localhost:50051 cachelib.grpc.CacheService/Increment
+
+# Response: {"success":true,"newValue":"1"}
+
+# Decrement
+grpcurl -plaintext -d '{"key":"rate:api:user:789","delta":1}' \
+  localhost:50051 cachelib.grpc.CacheService/Decrement
+
+# Check if newValue > limit to reject request
+# Example: limit = 100 requests per minute
+```
+
+### Session Management (Touch)
+
+```bash
+# Extend session TTL without fetching/modifying value
+grpcurl -plaintext -d '{"key":"session:abc123","ttl_seconds":1800}' \
+  localhost:50051 cachelib.grpc.CacheService/Touch
+
+# Response: {"success":true,"message":"TTL updated"}
+```
+
+### TTL Monitoring (GetTTL)
+
+```bash
+# Check remaining TTL
+# Returns: -1 = no expiry, -2 = not found, 0+ = seconds remaining
+grpcurl -plaintext -d '{"key":"session:abc123"}' \
+  localhost:50051 cachelib.grpc.CacheService/GetTTL
+
+# Response: {"found":true,"ttlSeconds":"1799"}
+```
+
+### Atomic Compare-and-Swap
+
+```bash
+# Update only if current value matches expected
+grpcurl -plaintext -d '{"key":"version","expected_value":"djE=","new_value":"djI=","ttl_seconds":0}' \
+  localhost:50051 cachelib.grpc.CacheService/CompareAndSwap
+
+# Response if successful: {"success":true,"actualValue":"djI="}
+# Response if mismatch: {"success":false,"actualValue":"djM="}
+```
+
+### Batch Operations
+
+```bash
+# MultiGet
+grpcurl -plaintext -d '{"keys":["user:1","user:2","user:3"]}' \
+  localhost:50051 cachelib.grpc.CacheService/MultiGet
+
+# MultiSet
+grpcurl -plaintext -d '{"items":[{"key":"k1","value":"djE=","ttl_seconds":60},{"key":"k2","value":"djI=","ttl_seconds":60}]}' \
+  localhost:50051 cachelib.grpc.CacheService/MultiSet
+```
+
+### Cache Statistics
+
+```bash
+grpcurl -plaintext localhost:50051 cachelib.grpc.CacheService/Stats
+```
+
+Response:
+```json
+{
+  "totalSize": "1069547520",
+  "usedSize": "4194304",
+  "itemCount": "1000",
+  "hitRate": 0.95,
+  "getCount": "5000",
+  "hitCount": "4750",
+  "missCount": "250",
+  "setCount": "1000",
+  "deleteCount": "50",
+  "evictionCount": "0",
+  "uptimeSeconds": "3600",
+  "version": "1.2.1"
+}
 ```
 
 ## Configuration
@@ -114,89 +215,55 @@ make -j
 | `--max_item_size` | `4194304` (4MB) | Maximum item size |
 | `--log_level` | `INFO` | Log level (DBG,INFO,WARN,ERR) |
 
-### Environment Variables
+### Docker Compose
 
-You can also configure via environment variables (useful in Docker):
+```yaml
+version: '3.8'
+services:
+  cachelib:
+    image: ghcr.io/celikgo/cachelib-grpc-server:1.2.1
+    ports:
+      - "50051:50051"
+    command: ["--cache_size=2147483648"]
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=:50051"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+```
 
+## Proto File
+
+The protobuf definition is available at:
+- Inside container: `/opt/cachelib/proto/cache.proto`
+- GitHub: [standalone_server/proto/cache.proto](proto/cache.proto)
+
+Extract from container:
 ```bash
-CACHELIB_CACHE_SIZE=2147483648
-CACHELIB_ENABLE_NVM=true
-CACHELIB_NVM_SIZE=10737418240
+docker cp cachelib:/opt/cachelib/proto/cache.proto .
 ```
 
-## gRPC API
+## Client Libraries
 
-### Service Definition
+### Java
 
-```protobuf
-service CacheService {
-  rpc Get(GetRequest) returns (GetResponse) {}
-  rpc Set(SetRequest) returns (SetResponse) {}
-  rpc Delete(DeleteRequest) returns (DeleteResponse) {}
-  rpc MultiGet(MultiGetRequest) returns (MultiGetResponse) {}
-  rpc MultiSet(MultiSetRequest) returns (MultiSetResponse) {}
-  rpc Exists(ExistsRequest) returns (ExistsResponse) {}
-  rpc Stats(StatsRequest) returns (StatsResponse) {}
-  rpc Ping(PingRequest) returns (PingResponse) {}
-}
+```xml
+<dependency>
+  <groupId>io.grpc</groupId>
+  <artifactId>grpc-netty-shaded</artifactId>
+  <version>1.60.0</version>
+</dependency>
+<dependency>
+  <groupId>io.grpc</groupId>
+  <artifactId>grpc-protobuf</artifactId>
+  <version>1.60.0</version>
+</dependency>
+<dependency>
+  <groupId>io.grpc</groupId>
+  <artifactId>grpc-stub</artifactId>
+  <version>1.60.0</version>
+</dependency>
 ```
-
-### Operations
-
-#### Set
-
-Stores a key-value pair with optional TTL.
-
-```protobuf
-message SetRequest {
-  string key = 1;
-  bytes value = 2;
-  int64 ttl_seconds = 3;  // 0 = no expiration
-}
-
-message SetResponse {
-  bool success = 1;
-  string message = 2;
-}
-```
-
-#### Get
-
-Retrieves a value by key.
-
-```protobuf
-message GetRequest {
-  string key = 1;
-}
-
-message GetResponse {
-  bool found = 1;
-  bytes value = 2;
-  int64 ttl_remaining = 3;  // Remaining TTL in seconds
-}
-```
-
-#### Delete
-
-Removes a key from the cache.
-
-```protobuf
-message DeleteRequest {
-  string key = 1;
-}
-
-message DeleteResponse {
-  bool success = 1;
-  bool key_existed = 2;
-  string message = 3;
-}
-```
-
-## Client Examples
-
-### Java Client
-
-A complete Java client is provided in `examples/java-client/`.
 
 ```java
 try (CacheLibClient client = new CacheLibClient("localhost", 50051)) {
@@ -209,13 +276,17 @@ try (CacheLibClient client = new CacheLibClient("localhost", 50051)) {
     // Get
     Optional<String> value = client.getString("user:123");
 
-    // Delete
-    boolean existed = client.delete("user:123");
+    // SetNX for distributed locking
+    SetNXResult lock = client.setNX("lock:resource", "owner-1", 30);
+    if (lock.wasSet()) {
+        // Lock acquired
+    }
 
-    // Multi-get
-    Map<String, Optional<byte[]>> results = client.multiGet(
-        Arrays.asList("key1", "key2", "key3")
-    );
+    // Increment for rate limiting
+    IncrementResult counter = client.increment("rate:user:123", 1, 60);
+    if (counter.getNewValue() > 100) {
+        // Rate limit exceeded
+    }
 
     // Stats
     CacheStats stats = client.getStats();
@@ -223,15 +294,16 @@ try (CacheLibClient client = new CacheLibClient("localhost", 50051)) {
 }
 ```
 
-Build and run:
+See [Java Client Example](../examples/java-client) for a complete implementation.
+
+### Python
 
 ```bash
-cd examples/java-client
-mvn package
-java -jar target/cachelib-grpc-client-1.0.0-SNAPSHOT.jar localhost 50051
-```
+pip install grpcio grpcio-tools
 
-### Python Client (Example)
+# Generate Python stubs
+python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. cache.proto
+```
 
 ```python
 import grpc
@@ -242,57 +314,109 @@ channel = grpc.insecure_channel('localhost:50051')
 stub = cache_pb2_grpc.CacheServiceStub(channel)
 
 # Set
-response = stub.Set(cache_pb2.SetRequest(
-    key="mykey",
-    value=b"myvalue",
-    ttl_seconds=3600
-))
-print(f"Set success: {response.success}")
+stub.Set(cache_pb2.SetRequest(key="mykey", value=b"myvalue", ttl_seconds=60))
 
 # Get
 response = stub.Get(cache_pb2.GetRequest(key="mykey"))
 if response.found:
-    print(f"Value: {response.value.decode()}")
+    print(response.value)
+
+# SetNX (distributed lock)
+response = stub.SetNX(cache_pb2.SetNXRequest(
+    key="lock:resource", value=b"owner-1", ttl_seconds=30))
+if response.was_set:
+    print("Lock acquired!")
+
+# Increment (rate limiting)
+response = stub.Increment(cache_pb2.IncrementRequest(
+    key="rate:user:123", delta=1, ttl_seconds=60))
+print(f"Counter: {response.new_value}")
 ```
 
-### Go Client (Example)
+### Go
+
+```bash
+go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+protoc --go_out=. --go-grpc_out=. cache.proto
+```
 
 ```go
+import (
+    "context"
+    "google.golang.org/grpc"
+    pb "your/package/cache"
+)
+
 conn, _ := grpc.Dial("localhost:50051", grpc.WithInsecure())
 client := pb.NewCacheServiceClient(conn)
+ctx := context.Background()
 
 // Set
-_, _ = client.Set(context.Background(), &pb.SetRequest{
-    Key:        "mykey",
-    Value:      []byte("myvalue"),
-    TtlSeconds: 3600,
-})
+client.Set(ctx, &pb.SetRequest{Key: "mykey", Value: []byte("myvalue"), TtlSeconds: 60})
 
 // Get
-resp, _ := client.Get(context.Background(), &pb.GetRequest{Key: "mykey"})
+resp, _ := client.Get(ctx, &pb.GetRequest{Key: "mykey"})
 if resp.Found {
-    fmt.Printf("Value: %s\n", string(resp.Value))
+    fmt.Println(string(resp.Value))
 }
+
+// SetNX (distributed lock)
+lockResp, _ := client.SetNX(ctx, &pb.SetNXRequest{
+    Key: "lock:resource", Value: []byte("owner-1"), TtlSeconds: 30})
+if lockResp.WasSet {
+    fmt.Println("Lock acquired!")
+}
+```
+
+### Node.js
+
+```bash
+npm install @grpc/grpc-js @grpc/proto-loader
+```
+
+```javascript
+const grpc = require('@grpc/grpc-js');
+const protoLoader = require('@grpc/proto-loader');
+
+const packageDefinition = protoLoader.loadSync('cache.proto');
+const cacheProto = grpc.loadPackageDefinition(packageDefinition).cachelib.grpc;
+
+const client = new cacheProto.CacheService('localhost:50051', grpc.credentials.createInsecure());
+
+// Set
+client.Set({ key: 'mykey', value: Buffer.from('myvalue'), ttl_seconds: 60 }, (err, response) => {
+  console.log(response.success);
+});
+
+// Get
+client.Get({ key: 'mykey' }, (err, response) => {
+  if (response.found) {
+    console.log(response.value.toString());
+  }
+});
+
+// Increment
+client.Increment({ key: 'counter', delta: 1, ttl_seconds: 60 }, (err, response) => {
+  console.log(`Counter: ${response.new_value}`);
+});
 ```
 
 ## Hybrid Caching (DRAM + NVM)
 
 CacheLib supports transparent hybrid caching where hot items stay in DRAM and warm items are stored on flash/SSD.
 
-### Configuration for Hybrid Mode
-
 ```bash
 docker run -d -p 50051:50051 \
   -v /mnt/nvme:/data/nvm \
-  --device /dev/nvme0n1:/dev/nvme0n1 \
-  cachelib-grpc-server \
+  ghcr.io/celikgo/cachelib-grpc-server:1.2.1 \
   --cache_size=8589934592 \
   --enable_nvm=true \
   --nvm_path=/data/nvm/cache.dat \
   --nvm_size=107374182400 \
   --nvm_reader_threads=64 \
-  --nvm_writer_threads=64 \
-  --enable_io_uring=true
+  --nvm_writer_threads=64
 ```
 
 ### How It Works
@@ -302,94 +426,72 @@ docker run -d -p 50051:50051 \
 3. Gets check DRAM first, then NVM (with async promotion back to DRAM)
 4. Navy engine handles SSD optimization (BigHash for small items, BlockCache for large)
 
-## Monitoring
+## Performance
 
-### Health Checks
+Benchmark results (1000 iterations, single node):
 
-The server exposes gRPC health checking at the standard endpoint.
+| Value Size | vs Redis |
+|------------|----------|
+| 100 bytes | -35% |
+| 1 KB | -25% |
+| 10 KB | -18% |
 
-```bash
-# Using grpc_health_probe
-grpc_health_probe -addr=localhost:50051
-```
+CacheLib's strength is at scale with hybrid RAM+SSD caching, not single-node raw speed. For large datasets that exceed RAM, CacheLib provides significant cost savings by using SSD as a cache tier.
 
-### Statistics
-
-Use the `Stats` RPC to get runtime metrics:
-
-```
-total_size: 1073741824
-used_size: 524288000
-item_count: 100000
-hit_rate: 0.95
-get_count: 1000000
-hit_count: 950000
-miss_count: 50000
-set_count: 100000
-eviction_count: 10000
-nvm_enabled: true
-nvm_size: 10737418240
-nvm_used: 5368709120
-uptime_seconds: 3600
-```
-
-### Prometheus Metrics (Future)
-
-Prometheus metrics endpoint is planned for a future release.
-
-## Testing
-
-### Run Unit Tests
+## Building from Source
 
 ```bash
-cd standalone_server/build
-cmake -DBUILD_TESTS=ON ..
+# 1. Build CacheLib dependencies
+cd CacheLib
+./contrib/build.sh -j -d deps
+
+# 2. Build CacheLib
+./contrib/build.sh -j -d cachelib
+
+# 3. Install gRPC (v1.60.0 recommended)
+# Follow https://grpc.io/docs/languages/cpp/quickstart/
+
+# 4. Build the gRPC server
+cd standalone_server
+mkdir build && cd build
+cmake -DCMAKE_PREFIX_PATH="$PWD/../../opt/cachelib" \
+      -DCMAKE_BUILD_TYPE=Release ..
 make -j
-./cache_manager_test
-./cache_service_test
+
+# 5. Run the server
+./cachelib-grpc-server --port=50051 --cache_size=1073741824
 ```
 
-### Integration Testing
+### Build Docker Image
 
 ```bash
-# Start the server
-docker run -d -p 50051:50051 --name test-cache cachelib-grpc-server
-
-# Run Java client demo
-cd examples/java-client
-mvn package exec:java
-
-# Cleanup
-docker stop test-cache && docker rm test-cache
+docker build -t cachelib-grpc-server -f standalone_server/Dockerfile .
 ```
 
-## Performance Tuning
+## Docker Image
 
-### Optimal Settings for High Throughput
+| Tag | Description |
+|-----|-------------|
+| `latest` | Latest stable release |
+| `1.2.1` | Current version with all bug fixes |
 
-```bash
-# For a server with 64GB RAM, NVMe SSD
-cachelib-grpc-server \
-  --cache_size=32212254720 \
-  --enable_nvm=true \
-  --nvm_path=/mnt/nvme/cache.dat \
-  --nvm_size=214748364800 \
-  --nvm_reader_threads=64 \
-  --nvm_writer_threads=64 \
-  --lru_refresh_time=30 \
-  --max_item_size=16777216
-```
+**Registry:** `ghcr.io/celikgo/cachelib-grpc-server`
 
-### Docker Resource Limits
+## Changelog
 
-```yaml
-deploy:
-  resources:
-    limits:
-      memory: 40G
-    reservations:
-      memory: 35G
-```
+### v1.2.1
+- Fixed `setCount` and `getCount` stats visibility with sequential consistency
+- All atomic counters now use `memory_order_seq_cst` for guaranteed cross-thread visibility
+
+### v1.2.0
+- Added Redis-parity features: SetNX, Increment, Decrement, GetTTL, Touch, CompareAndSwap
+- Synced Java client with server proto
+- Fixed `uptimeSeconds` reporting
+- Fixed `usedSizeBytes` calculation
+
+### v1.1.0
+- Fixed `freeMemoryBytes` API call
+- Improved stats reporting
 
 ## Troubleshooting
 
@@ -405,7 +507,7 @@ deploy:
 - Monitor eviction rate in stats
 
 **"Connection refused" errors**
-- Verify the server is running: `docker logs cachelib-server`
+- Verify the server is running: `docker logs cachelib`
 - Check firewall rules and port mappings
 - Ensure correct host/port in client configuration
 
@@ -414,49 +516,14 @@ deploy:
 Increase log verbosity for debugging:
 
 ```bash
-cachelib-grpc-server --log_level=DBG
+docker run -d -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.2.1 --log_level=DBG
 ```
-
-## Architecture
-
-```
-                    ┌─────────────────────────────────────┐
-                    │         gRPC Clients                │
-                    │  (Java, Python, Go, Node.js, ...)   │
-                    └──────────────┬──────────────────────┘
-                                   │ gRPC (port 50051)
-                    ┌──────────────▼──────────────────────┐
-                    │        CacheServiceImpl             │
-                    │     (gRPC Service Handler)          │
-                    └──────────────┬──────────────────────┘
-                                   │
-                    ┌──────────────▼──────────────────────┐
-                    │         CacheManager                │
-                    │    (CacheLib Wrapper Layer)         │
-                    └──────────────┬──────────────────────┘
-                                   │
-                    ┌──────────────▼──────────────────────┐
-                    │       CacheLib LruAllocator         │
-                    ├─────────────────────────────────────┤
-                    │  ┌─────────────┐ ┌───────────────┐  │
-                    │  │    DRAM     │ │  NVM (Navy)   │  │
-                    │  │   Cache     │ │  Flash Cache  │  │
-                    │  └─────────────┘ └───────────────┘  │
-                    └─────────────────────────────────────┘
-```
-
-## Contributing
-
-We welcome contributions! Please see the main CacheLib [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines.
-
-### Development Setup
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
 
 ## License
 
-This project is part of CacheLib and is licensed under the Apache 2.0 License. See [LICENSE](../LICENSE) for details.
+Apache License 2.0 - See [LICENSE](../LICENSE) for details.
+
+## Support
+
+- **Issues:** https://github.com/celikgo/CacheLib/issues
+- **CacheLib Docs:** https://cachelib.org/
