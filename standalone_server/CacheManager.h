@@ -30,7 +30,7 @@ namespace cachelib {
 namespace grpc_server {
 
 // Server version
-constexpr const char* kServerVersion = "1.2.0";
+constexpr const char* kServerVersion = "1.2.1";
 
 // Configuration for the cache manager
 struct CacheConfig {

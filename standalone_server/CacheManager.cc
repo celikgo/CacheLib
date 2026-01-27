@@ -130,12 +130,12 @@ void CacheManager::shutdown() {
 GetResult CacheManager::get(std::string_view key) {
   GetResult result;
 
-  // Increment get count FIRST using explicit fetch_add for visibility
-  getCount_.fetch_add(1, std::memory_order_relaxed);
+  // Increment get count using sequential consistency for guaranteed visibility
+  getCount_.fetch_add(1, std::memory_order_seq_cst);
 
   if (!cache_) {
     XLOG(WARN) << "Cache not initialized";
-    missCount_.fetch_add(1, std::memory_order_relaxed);
+    missCount_.fetch_add(1, std::memory_order_seq_cst);
     return result;
   }
 
@@ -143,7 +143,7 @@ GetResult CacheManager::get(std::string_view key) {
     auto handle = cache_->find(folly::StringPiece(key.data(), key.size()));
 
     if (handle) {
-      hitCount_.fetch_add(1, std::memory_order_relaxed);
+      hitCount_.fetch_add(1, std::memory_order_seq_cst);
       result.found = true;
 
       // Copy the value
@@ -168,11 +168,11 @@ GetResult CacheManager::get(std::string_view key) {
         }
       }
     } else {
-      missCount_.fetch_add(1, std::memory_order_relaxed);
+      missCount_.fetch_add(1, std::memory_order_seq_cst);
     }
   } catch (const std::exception& ex) {
     XLOG(ERR) << "Error during get for key=" << key << ": " << ex.what();
-    missCount_.fetch_add(1, std::memory_order_relaxed);
+    missCount_.fetch_add(1, std::memory_order_seq_cst);
   }
 
   return result;
@@ -181,8 +181,8 @@ GetResult CacheManager::get(std::string_view key) {
 bool CacheManager::set(std::string_view key,
                        std::string_view value,
                        uint32_t ttlSeconds) {
-  // Increment set count FIRST using explicit fetch_add for visibility
-  setCount_.fetch_add(1, std::memory_order_relaxed);
+  // Increment set count using sequential consistency for guaranteed visibility
+  setCount_.fetch_add(1, std::memory_order_seq_cst);
 
   if (!cache_) {
     XLOG(WARN) << "Cache not initialized";
@@ -223,8 +223,8 @@ bool CacheManager::set(std::string_view key,
 }
 
 bool CacheManager::remove(std::string_view key) {
-  // Increment delete count using explicit fetch_add for visibility
-  deleteCount_.fetch_add(1, std::memory_order_relaxed);
+  // Increment delete count using sequential consistency for guaranteed visibility
+  deleteCount_.fetch_add(1, std::memory_order_seq_cst);
 
   if (!cache_) {
     XLOG(WARN) << "Cache not initialized";
@@ -634,12 +634,12 @@ CacheStats CacheManager::getStats() const {
     stats.itemCount = static_cast<int64_t>(globalStats.numItems);
     stats.evictionCount = static_cast<int64_t>(globalStats.numEvictions);
 
-    // Our tracked counters - use memory_order_acquire to ensure visibility
-    stats.getCount = getCount_.load(std::memory_order_acquire);
-    stats.hitCount = hitCount_.load(std::memory_order_acquire);
-    stats.missCount = missCount_.load(std::memory_order_acquire);
-    stats.setCount = setCount_.load(std::memory_order_acquire);
-    stats.deleteCount = deleteCount_.load(std::memory_order_acquire);
+    // Our tracked counters - use sequential consistency for guaranteed visibility
+    stats.getCount = getCount_.load(std::memory_order_seq_cst);
+    stats.hitCount = hitCount_.load(std::memory_order_seq_cst);
+    stats.missCount = missCount_.load(std::memory_order_seq_cst);
+    stats.setCount = setCount_.load(std::memory_order_seq_cst);
+    stats.deleteCount = deleteCount_.load(std::memory_order_seq_cst);
 
     if (stats.getCount > 0) {
       stats.hitRate =
