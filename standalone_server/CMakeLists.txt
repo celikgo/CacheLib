@@ -41,7 +41,87 @@ find_package(glog REQUIRED)
 find_package(GTest REQUIRED)  # Required by cachelib's cmake config
 find_package(NUMA REQUIRED)    # Required by cachelib's cmake config
 find_package(Folly REQUIRED)
-find_package(cachelib REQUIRED)
+
+# Try to find cachelib via find_package, otherwise set up manually
+find_package(cachelib QUIET)
+if(NOT cachelib_FOUND)
+  message(STATUS "CacheLib not found via find_package, setting up manually")
+
+  # Look for CacheLib in /opt/cachelib (Docker build) or CMAKE_PREFIX_PATH
+  set(CACHELIB_ROOT "" CACHE PATH "Path to CacheLib installation")
+  if(NOT CACHELIB_ROOT)
+    if(EXISTS "/opt/cachelib/lib/libcachelib_allocator.a")
+      set(CACHELIB_ROOT "/opt/cachelib")
+    else()
+      foreach(prefix IN LISTS CMAKE_PREFIX_PATH)
+        if(EXISTS "${prefix}/lib/libcachelib_allocator.a")
+          set(CACHELIB_ROOT "${prefix}")
+          break()
+        endif()
+      endforeach()
+    endif()
+  endif()
+
+  if(NOT CACHELIB_ROOT)
+    message(FATAL_ERROR "Could not find CacheLib. Set CACHELIB_ROOT to the installation directory.")
+  endif()
+
+  message(STATUS "Found CacheLib at: ${CACHELIB_ROOT}")
+
+  # Find FBThrift and its dependencies (needed for cachelib)
+  find_package(wangle REQUIRED)
+  find_package(FBThrift REQUIRED)
+
+  # Create imported targets for CacheLib libraries
+  add_library(cachelib_allocator STATIC IMPORTED)
+  set_target_properties(cachelib_allocator PROPERTIES
+    IMPORTED_LOCATION "${CACHELIB_ROOT}/lib/libcachelib_allocator.a"
+  )
+
+  add_library(cachelib_navy STATIC IMPORTED)
+  set_target_properties(cachelib_navy PROPERTIES
+    IMPORTED_LOCATION "${CACHELIB_ROOT}/lib/libcachelib_navy.a"
+  )
+
+  add_library(cachelib_common STATIC IMPORTED)
+  set_target_properties(cachelib_common PROPERTIES
+    IMPORTED_LOCATION "${CACHELIB_ROOT}/lib/libcachelib_common.a"
+  )
+
+  add_library(cachelib_shm STATIC IMPORTED)
+  set_target_properties(cachelib_shm PROPERTIES
+    IMPORTED_LOCATION "${CACHELIB_ROOT}/lib/libcachelib_shm.a"
+  )
+
+  add_library(cachelib_datatype STATIC IMPORTED)
+  set_target_properties(cachelib_datatype PROPERTIES
+    IMPORTED_LOCATION "${CACHELIB_ROOT}/lib/libcachelib_datatype.a"
+  )
+
+  add_library(cachelib_nvmitem STATIC IMPORTED)
+  set_target_properties(cachelib_nvmitem PROPERTIES
+    IMPORTED_LOCATION "${CACHELIB_ROOT}/lib/libcachelib_nvmitem.a"
+  )
+
+  # Create a combined cachelib interface target
+  add_library(cachelib INTERFACE)
+  target_include_directories(cachelib INTERFACE "${CACHELIB_ROOT}/include")
+  target_link_libraries(cachelib INTERFACE
+    cachelib_allocator
+    cachelib_nvmitem
+    cachelib_navy
+    cachelib_common
+    cachelib_shm
+    cachelib_datatype
+    Folly::folly
+    FBThrift::thriftcpp2
+    FBThrift::thriftprotocol
+    NUMA::NUMA
+    Threads::Threads
+    GTest::gtest
+    GTest::gmock
+  )
+endif()
 
 # Find gRPC and Protobuf
 find_package(Protobuf CONFIG REQUIRED)

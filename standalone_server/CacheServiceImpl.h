@@ -19,7 +19,7 @@
 #include <grpcpp/grpcpp.h>
 
 #include "CacheManager.h"
-#include "proto/cache.grpc.pb.h"
+#include "cache.grpc.pb.h"
 
 namespace cachelib {
 namespace grpc_server {

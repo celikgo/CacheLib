@@ -36,15 +36,25 @@ add_dependencies(cachelib_common thrift_generated_files)
 # Find xxhash library
 find_library(XXHASH_LIBRARY xxhash)
 
+# Check for optional folly exception tracer targets
+set(FOLLY_EXCEPTION_LIBS "")
+if(TARGET Folly::folly_exception_tracer)
+  list(APPEND FOLLY_EXCEPTION_LIBS Folly::folly_exception_tracer)
+endif()
+if(TARGET Folly::folly_exception_tracer_base)
+  list(APPEND FOLLY_EXCEPTION_LIBS Folly::folly_exception_tracer_base)
+endif()
+if(TARGET Folly::folly_exception_counter)
+  list(APPEND FOLLY_EXCEPTION_LIBS Folly::folly_exception_counter)
+endif()
+
 target_link_libraries(cachelib_common PUBLIC
   Threads::Threads
   FBThrift::thriftcpp2
   FBThrift::thriftprotocol
   Folly::folly
   Folly::follybenchmark
-  Folly::folly_exception_tracer
-  Folly::folly_exception_tracer_base
-  Folly::folly_exception_counter
+  ${FOLLY_EXCEPTION_LIBS}
   GTest::gtest
   ${XXHASH_LIBRARY}
 )

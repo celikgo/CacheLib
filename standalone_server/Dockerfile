@@ -57,6 +57,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     zlib1g-dev \
     sudo \
+    libxxhash-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -83,6 +84,12 @@ RUN git clone --recurse-submodules -b ${GRPC_VERSION} --depth 1 https://github.c
 # kernel features not available in Docker VM. By not having liburing,
 # folly will build without io_uring support.
 
+# Install magic_enum (header-only library required by CacheLib)
+RUN git clone --depth 1 --branch v0.9.5 https://github.com/Neargye/magic_enum.git && \
+    mkdir -p /usr/local/include/magic_enum && \
+    cp magic_enum/include/magic_enum/*.hpp /usr/local/include/magic_enum/ && \
+    rm -rf magic_enum
+
 # Clone CacheLib from GitHub (ensures all dependencies are properly fetched)
 ARG CACHELIB_REPO=https://github.com/facebook/CacheLib.git
 ARG CACHELIB_BRANCH=main
@@ -94,26 +101,61 @@ COPY standalone_server /build/CacheLib/standalone_server
 # Patch folly manifest to disable io_uring (Docker VM kernel limitation)
 COPY build/fbcode_builder/manifests/folly /build/CacheLib/build/fbcode_builder/manifests/folly
 
-# Build CacheLib using getdeps.py (recommended approach)
+# Build CacheLib dependencies only (not cachelib itself) using getdeps.py
 WORKDIR /build/CacheLib
-RUN python3 ./build/fbcode_builder/getdeps.py --allow-system-packages build cachelib
+RUN python3 ./build/fbcode_builder/getdeps.py --allow-system-packages build --only-deps cachelib
 
-# Find the CacheLib install directory and all dependency directories
-RUN CACHELIB_INSTALL=$(python3 ./build/fbcode_builder/getdeps.py --allow-system-packages show-inst-dir cachelib) && \
-    INSTALL_PREFIX=$(dirname ${CACHELIB_INSTALL}) && \
-    echo "CACHELIB_INSTALL=${CACHELIB_INSTALL}" && \
+# Get the install prefix used by getdeps
+RUN INSTALL_PREFIX=$(python3 ./build/fbcode_builder/getdeps.py --allow-system-packages show-inst-dir fbthrift | xargs dirname) && \
     echo "INSTALL_PREFIX=${INSTALL_PREFIX}" && \
-    ln -s ${CACHELIB_INSTALL} /opt/cachelib-install && \
     ln -s ${INSTALL_PREFIX} /opt/getdeps-install
+
+# Patch CacheLib CMakeLists.txt to make exception tracer optional
+COPY cachelib/common/CMakeLists.txt /build/CacheLib/cachelib/common/CMakeLists.txt
+
+# Build CacheLib manually with patched source
+WORKDIR /build/CacheLib
+RUN mkdir -p cachelib-build && \
+    cd cachelib-build && \
+    INSTALL_PREFIX=$(readlink -f /opt/getdeps-install) && \
+    # Build CMAKE_PREFIX_PATH from all installed dependencies
+    CMAKE_PATHS="" && \
+    for dir in ${INSTALL_PREFIX}/*/; do \
+        if [ -z "$CMAKE_PATHS" ]; then \
+            CMAKE_PATHS="${dir}"; \
+        else \
+            CMAKE_PATHS="${CMAKE_PATHS};${dir}"; \
+        fi; \
+    done && \
+    CMAKE_PATHS="${CMAKE_PATHS};/usr/local" && \
+    echo "CMAKE_PREFIX_PATH=${CMAKE_PATHS}" && \
+    cmake -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_PREFIX_PATH="${CMAKE_PATHS}" \
+          -DCMAKE_INSTALL_PREFIX=/opt/cachelib \
+          -DBUILD_TESTS=OFF \
+          -G Ninja \
+          ../cachelib && \
+    ninja -j$(nproc) cachelib_allocator cachelib_navy cachelib_common cachelib_shm cachelib_datatype cachelib_nvmitem && \
+    mkdir -p /opt/cachelib/lib /opt/cachelib/include/cachelib && \
+    cp allocator/libcachelib_allocator.a /opt/cachelib/lib/ && \
+    cp allocator/libcachelib_nvmitem.a /opt/cachelib/lib/ && \
+    cp navy/libcachelib_navy.a /opt/cachelib/lib/ && \
+    cp common/libcachelib_common.a /opt/cachelib/lib/ && \
+    cp shm/libcachelib_shm.a /opt/cachelib/lib/ && \
+    cp datatype/libcachelib_datatype.a /opt/cachelib/lib/ && \
+    cp -r ../cachelib/* /opt/cachelib/include/cachelib/ && \
+    cp -r cachelib/* /opt/cachelib/include/cachelib/
+
+# Create symlink for compatibility
+RUN ln -s /opt/cachelib /opt/cachelib-install
 
 # Build the gRPC server
 WORKDIR /build/CacheLib/standalone_server
 RUN mkdir -p build && \
     cd build && \
-    CACHELIB_DIR=$(readlink -f /opt/cachelib-install) && \
     INSTALL_PREFIX=$(readlink -f /opt/getdeps-install) && \
     # Build CMAKE_PREFIX_PATH from all installed dependencies
-    CMAKE_PATHS="${CACHELIB_DIR}" && \
+    CMAKE_PATHS="/opt/cachelib" && \
     for dir in ${INSTALL_PREFIX}/*/; do CMAKE_PATHS="${CMAKE_PATHS};${dir}"; done && \
     CMAKE_PATHS="${CMAKE_PATHS};/usr/local" && \
     echo "CMAKE_PREFIX_PATH=${CMAKE_PATHS}" && \
@@ -131,8 +173,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install runtime dependencies only (Ubuntu 24.04 packages)
 RUN apt-get update && apt-get install -y \
+    libaio1t64 \
     libboost-context1.83.0 \
     libboost-filesystem1.83.0 \
+    libboost-iostreams1.83.0 \
     libboost-program-options1.83.0 \
     libboost-regex1.83.0 \
     libboost-system1.83.0 \
@@ -150,13 +194,14 @@ RUN apt-get update && apt-get install -y \
     libunwind8 \
     libzstd1 \
     liburing2 \
+    libxxhash0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user for security
 RUN useradd -m -s /bin/bash cachelib
 
 # Copy built artifacts from builder stage
-COPY --from=builder /opt/cachelib-install/lib /opt/cachelib/lib
+COPY --from=builder /opt/cachelib/lib /opt/cachelib/lib
 COPY --from=builder /build/CacheLib/standalone_server/build/cachelib-grpc-server /usr/local/bin/
 COPY --from=builder /usr/local/lib/libgrpc*.so* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libprotobuf*.so* /usr/local/lib/
@@ -165,6 +210,16 @@ COPY --from=builder /usr/local/lib/libre2*.so* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libupb*.so* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libaddress_sorting*.so* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libgpr*.so* /usr/local/lib/
+
+# Copy getdeps-built shared libraries (folly, glog, fbthrift, etc.)
+COPY --from=builder /opt/getdeps-install/folly/lib/*.so* /usr/local/lib/
+COPY --from=builder /opt/getdeps-install/glog-*/lib/*.so* /usr/local/lib/
+COPY --from=builder /opt/getdeps-install/fmt-*/lib/*.so* /usr/local/lib/
+COPY --from=builder /opt/getdeps-install/fbthrift/lib/*.so* /usr/local/lib/
+COPY --from=builder /opt/getdeps-install/fizz/lib/*.so* /usr/local/lib/
+COPY --from=builder /opt/getdeps-install/wangle/lib/*.so* /usr/local/lib/
+COPY --from=builder /opt/getdeps-install/mvfst/lib/*.so* /usr/local/lib/
+COPY --from=builder /opt/getdeps-install/liboqs-*/lib/*.so* /usr/local/lib/
 
 # Copy proto file for reference
 COPY --from=builder /build/CacheLib/standalone_server/proto/cache.proto /opt/cachelib/proto/

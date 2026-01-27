@@ -93,7 +93,7 @@ void CacheManager::configureNvmCache(CacheAllocatorConfig& cacheConfig) {
 
   // Configure BigHash for small objects (items < 2KB)
   auto& bigHashConfig = navyConfig.bigHash();
-  bigHashConfig.setSizePct(10);  // 10% of NVM for BigHash
+  bigHashConfig.setSizePctAndMaxItemSize(10, 2048);  // 10% of NVM for BigHash, max 2KB items
   bigHashConfig.setBucketSize(4096);
   bigHashConfig.setBucketBfSize(8);
 
@@ -106,7 +106,9 @@ void CacheManager::configureNvmCache(CacheAllocatorConfig& cacheConfig) {
   navyConfig.enableRandomAdmPolicy().setAdmProbability(1.0);
 
   // Enable NVM cache in the allocator config
-  cacheConfig.enableNvmCache(navyConfig);
+  typename Cache::NvmCacheConfig nvmCacheConfig;
+  nvmCacheConfig.navyConfig = navyConfig;
+  cacheConfig.enableNvmCache(nvmCacheConfig);
 
   XLOG(INFO) << "NVM cache configured successfully";
 }
@@ -260,7 +262,7 @@ CacheStats CacheManager::getStats() const {
 
     stats.totalSize = static_cast<int64_t>(memStats.ramCacheSize);
     stats.usedSize = static_cast<int64_t>(
-        memStats.ramCacheSize - memStats.freeMemorySize);
+        memStats.ramCacheSize - memStats.unReservedSize);
     stats.itemCount = static_cast<int64_t>(globalStats.numItems);
     stats.evictionCount = static_cast<int64_t>(globalStats.numEvictions);
 
@@ -277,12 +279,13 @@ CacheStats CacheManager::getStats() const {
     // NVM stats if enabled
     stats.nvmEnabled = config_.enableNvm;
     if (config_.enableNvm) {
-      auto nvmStats = cache_->getNvmCacheStatsMap();
+      auto nvmStatsMap = cache_->getNvmCacheStatsMap();
+      auto nvmStats = nvmStatsMap.toMap();
       stats.nvmSize = static_cast<int64_t>(config_.nvmCacheSize);
       // NVM used bytes would come from Navy stats
-      if (nvmStats.find("navy_device_bytes_written") != nvmStats.end()) {
-        stats.nvmUsed = static_cast<int64_t>(
-            nvmStats.at("navy_device_bytes_written"));
+      auto it = nvmStats.find("navy_device_bytes_written");
+      if (it != nvmStats.end()) {
+        stats.nvmUsed = static_cast<int64_t>(it->second);
       }
     }
 
