@@ -2,7 +2,7 @@
 
 A high-performance caching server from Meta/Facebook, available as a Docker container. Use it as an alternative to Redis with superior performance and hybrid DRAM+SSD caching capabilities.
 
-**Version:** 1.1.0
+**Version:** 1.2.1
 
 ## Quick Start
 
