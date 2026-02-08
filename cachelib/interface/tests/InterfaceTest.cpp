@@ -83,7 +83,6 @@ class TestCacheComponent : public CacheComponent {
 
     auto [_, inserted] = cachedItems_.try_emplace(handle->getKey(), *itemIt);
     if (!inserted) {
-      XLOG(INFO) << "duplicate key, no releasing handle";
       co_return makeError(Error::Code::ALREADY_INSERTED, "duplicate key");
     }
 
@@ -173,11 +172,17 @@ class TestCacheComponent : public CacheComponent {
     return std::find(allocatedItems_.begin(), allocatedItems_.end(), item);
   }
 
+  size_t writeBacks_{0};
   std::vector<TestCacheItem*> allocatedItems_;
   folly::F14FastMap<std::string, TestCacheItem*> cachedItems_;
   folly::F14FastSet<std::string> removedItems_;
 
  private:
+  UnitResult writeBack(CacheItem& /* item */) override {
+    writeBacks_++;
+    return folly::unit;
+  }
+
   folly::coro::Task<void> release(CacheItem& item, bool inserted) override {
     if (inserted) {
       CO_ASSERT_TRUE(cachedItems_.erase(item.getKey()) > 0 ||
@@ -192,7 +197,7 @@ class TestCacheComponent : public CacheComponent {
   }
 };
 
-class CacheComponentTest : public ::testing::Test {
+class InterfaceTest : public ::testing::Test {
  public:
   void TearDown() override {
     EXPECT_TRUE(cache_.allocatedItems_.empty());
@@ -227,7 +232,7 @@ class CacheComponentTest : public ::testing::Test {
 };
 
 template <typename HandleType>
-class HandleTest : public CacheComponentTest {
+class HandleTest : public InterfaceTest {
  public:
   template <typename HandleT>
   TestCacheItem* makeItem() {
@@ -275,29 +280,33 @@ TYPED_TEST(HandleTest, move) {
   {
     TypeParam handle1(this->cache_, *item);
     TypeParam handle2(std::move(handle1));
-    EXPECT_FALSE(handle1);
+    EXPECT_FALSE(handle1); // NOLINT(bugprone-use-after-move)
     this->checkItemFields(handle2);
   }
   this->template checkReleased<TypeParam>(item, /* removedFromCache */ false);
 }
 
-CO_TEST_F(CacheComponentTest, basic) {
+CO_TEST_F(InterfaceTest, basic) {
   co_await allocateAndInsertItem();
 
   auto readHandle = ASSERT_OK(co_await cache_.find(key_));
   CO_ASSERT_TRUE(readHandle.has_value());
   checkItemFields(readHandle.value());
 
-  auto writeHandle = ASSERT_OK(co_await cache_.findToWrite(key_));
-  CO_ASSERT_TRUE(writeHandle.has_value());
-  checkItemFields(writeHandle.value());
+  {
+    auto writeHandle = ASSERT_OK(co_await cache_.findToWrite(key_));
+    CO_ASSERT_TRUE(writeHandle.has_value());
+    checkItemFields(writeHandle.value());
+    writeHandle->markDirty();
+  }
+  EXPECT_EQ(cache_.writeBacks_, 1);
 
   auto removed = ASSERT_OK(co_await cache_.remove(key_));
   EXPECT_TRUE(removed);
   EXPECT_FALSE(this->cache_.cachedItems_.contains(this->key_));
 }
 
-CO_TEST_F(CacheComponentTest, replace) {
+CO_TEST_F(InterfaceTest, replace) {
   co_await allocateAndInsertItem();
 
   auto allocHandle = ASSERT_OK(co_await cache_.allocate(
@@ -320,14 +329,14 @@ CO_TEST_F(CacheComponentTest, replace) {
   ASSERT_OK(co_await cache_.remove(std::move(readHandle)));
 }
 
-CO_TEST_F(CacheComponentTest, removeHandle) {
+CO_TEST_F(InterfaceTest, removeHandle) {
   co_await allocateAndInsertItem();
   auto readHandle = ASSERT_OK(co_await cache_.find(key_));
   ASSERT_OK(co_await cache_.remove(std::move(readHandle.value())));
   EXPECT_FALSE(this->cache_.cachedItems_.contains(this->key_));
 }
 
-CO_TEST_F(CacheComponentTest, duplicate) {
+CO_TEST_F(InterfaceTest, duplicate) {
   co_await allocateAndInsertItem();
   auto allocHandle = ASSERT_OK(co_await cache_.allocate(
       key_, /* valueSize */ 128, /* creationTime */ 1000, /* ttl */ 10));

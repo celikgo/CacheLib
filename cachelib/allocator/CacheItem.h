@@ -170,6 +170,10 @@ class CACHELIB_PACKED_ATTR CacheItem {
   // Fetch the key corresponding to the allocation
   const Key getKey() const noexcept;
 
+  // Same as above but safe to call for unallocated data.  User must specify an
+  // allocation size.
+  const Key getKeySized(uint32_t allocSize) const noexcept;
+
   // Readonly memory for this allocation.
   const void* getMemory() const noexcept;
 
@@ -643,6 +647,12 @@ const typename CacheItem<CacheTrait>::Key CacheItem<CacheTrait>::getKey()
 }
 
 template <typename CacheTrait>
+const typename CacheItem<CacheTrait>::Key CacheItem<CacheTrait>::getKeySized(
+    uint32_t allocSize) const noexcept {
+  return alloc_.getKeySized(allocSize);
+}
+
+template <typename CacheTrait>
 const void* CacheItem<CacheTrait>::getMemory() const noexcept {
   return getMemoryInternal();
 }
@@ -690,21 +700,7 @@ uint32_t CacheItem<CacheTrait>::getExpiryTime() const noexcept {
 
 template <typename CacheTrait>
 bool CacheItem<CacheTrait>::isExpired() const noexcept {
-  thread_local uint32_t staleTime = 0;
-
-  if (expiryTime_ == 0) {
-    return false;
-  }
-
-  if (expiryTime_ < staleTime) {
-    return true;
-  }
-
-  uint32_t currentTime = static_cast<uint32_t>(util::getCurrentTimeSec());
-  if (currentTime != staleTime) {
-    staleTime = currentTime;
-  }
-  return expiryTime_ < currentTime;
+  return util::isExpired(expiryTime_);
 }
 
 template <typename CacheTrait>

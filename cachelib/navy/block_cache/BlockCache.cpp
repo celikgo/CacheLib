@@ -180,8 +180,8 @@ BlockCache::BlockCache(Config&& config, ValidConfigTag)
   XDCHECK_NE(readBufferSize_, 0u);
 
   legacyEventTracker_ = config.legacyEventTracker;
-  eventTracker_ = config.eventTracker;
 }
+
 std::shared_ptr<BlockCacheReinsertionPolicy> BlockCache::makeReinsertionPolicy(
     const BlockCacheReinsertionConfig& reinsertionConfig) {
   auto hitsThreshold = reinsertionConfig.getHitsThreshold();
@@ -209,56 +209,50 @@ Status BlockCache::insert(HashedKey hk, BufferView value) {
   };
   INJECT_PAUSE(pause_blockcache_insert_entry);
 
-  uint32_t size = serializedSize(hk.key().size(), value.size());
-  if (size > kMaxItemSize) {
-    allocErrorCount_.inc();
-    insertCount_.inc();
-    return Status::Rejected;
+  auto allocateRes = allocateForInsert(hk, value.size());
+  if (allocateRes.hasError()) {
+    return allocateRes.error();
   }
-
-  // All newly inserted items are assigned with the lowest priority
-  auto [desc, addr] = allocator_.allocate(size, kDefaultItemPriority,
-                                          true /* canWait */, hk.keyHash());
-
-  switch (desc.status()) {
-  case OpenStatus::Error:
-    allocErrorCount_.inc();
-    insertCount_.inc();
-    return Status::Rejected;
-  case OpenStatus::Ready:
-    insertCount_.inc();
-    break;
-  case OpenStatus::Retry:
-    allocRetryCount_.inc();
-    return Status::Retry;
-  }
+  auto& [desc, slotSize, addr] = allocateRes.value();
 
   // After allocation a region is opened for writing. Until we close it, the
   // region would not be reclaimed and index never gets an invalid entry.
-  const auto status = writeEntry(addr, size, hk, value);
-  auto newObjSizeHint = encodeSizeHint(size);
-  if (status == Status::Ok) {
-    const auto lr = index_->insert(
-        hk.keyHash(), encodeRelAddress(addr.add(size)), newObjSizeHint);
-    // We replaced an existing key in the index
-    uint64_t newObjSize = decodeSizeHint(newObjSizeHint);
-    uint64_t oldObjSize = 0;
-    if (lr.found()) {
-      oldObjSize = decodeSizeHint(lr.sizeHint());
-      holeSizeTotal_.add(oldObjSize);
-      holeCount_.inc();
-      insertHashCollisionCount_.inc();
-    }
-    succInsertCount_.inc();
-    if (newObjSize < oldObjSize) {
-      usedSizeBytes_.sub(oldObjSize - newObjSize);
-    } else {
-      usedSizeBytes_.add(newObjSize - oldObjSize);
-    }
-  }
+  writeEntry(addr, slotSize, hk, value);
+  updateIndex(hk.keyHash(), slotSize, addr, /* allowReplace */ true);
   allocator_.close(std::move(desc));
   INJECT_PAUSE(pause_blockcache_insert_done);
-  return status;
+  return Status::Ok;
+}
+
+bool BlockCache::updateIndex(uint64_t keyHash,
+                             uint32_t size,
+                             const RelAddress& addr,
+                             bool allowReplace) const {
+  auto newObjSizeHint = encodeSizeHint(size);
+  auto encodedAddr = encodeRelAddress(addr.add(size));
+  const auto lr =
+      allowReplace
+          ? index_->insert(keyHash, encodedAddr, newObjSizeHint)
+          : index_->insertIfNotExists(keyHash, encodedAddr, newObjSizeHint);
+  // We replaced an existing key in the index
+  uint64_t newObjSize = decodeSizeHint(newObjSizeHint);
+  uint64_t oldObjSize = 0;
+  if (lr.found()) {
+    insertHashCollisionCount_.inc();
+    if (allowReplace) {
+      oldObjSize = decodeSizeHint(lr.sizeHint());
+      addHole(oldObjSize);
+    } else {
+      return false;
+    }
+  }
+  succInsertCount_.inc();
+  if (newObjSize < oldObjSize) {
+    usedSizeBytes_.sub(oldObjSize - newObjSize);
+  } else {
+    usedSizeBytes_.add(newObjSize - oldObjSize);
+  }
+  return true;
 }
 
 bool BlockCache::couldExist(HashedKey hk) {
@@ -274,23 +268,24 @@ uint64_t BlockCache::estimateWriteSize(HashedKey hk, BufferView value) const {
   return serializedSize(hk.key().size(), value.size());
 }
 
-Status BlockCache::lookup(HashedKey hk, Buffer& value) {
+BlockCache::LookupData BlockCache::lookupInternal(HashedKey hk) {
   auto start = getSteadyClock();
   SCOPE_EXIT {
     lookupLatency_.trackValue(toMicros(getSteadyClock() - start).count());
   };
 
   auto retryIndex = (regionManager_.readAllowedDuringReclaim() ? 1 : 0);
-  RegionDescriptor desc;
-  RelAddress addrEnd;
   Index::LookupResult lr;
+  RelAddress addrEnd;
+  LookupData ld;
 
   do {
     auto seqNumber = regionManager_.getSeqNumber();
     lr = index_->lookup(hk.keyHash());
     if (!lr.found()) {
       lookupCount_.inc();
-      return Status::NotFound;
+      ld.status_ = Status::NotFound;
+      return ld;
     }
     // If relative address has offset 0, the entry actually belongs to the
     // previous region (this is address of its end). To compensate for this, we
@@ -305,7 +300,7 @@ Status BlockCache::lookup(HashedKey hk, Buffer& value) {
     //  number increased with that and open will fail because of sequence number
     //  check. (This means sequence number will be increased when we finish
     //  reclaim.)
-    desc = regionManager_.openForRead(addrEnd.rid(), seqNumber);
+    ld.desc_ = regionManager_.openForRead(addrEnd.rid(), seqNumber);
     // If we get OpenStatus::Retry when read is allowed during reclaim, it means
     // reclaim has finished and reclaimed victim was reset/released (checked by
     // SeqNumber). Index should had been updated in this case (to the new
@@ -314,30 +309,28 @@ Status BlockCache::lookup(HashedKey hk, Buffer& value) {
     // In case read is NOT allowed during reclaim, there's no chance that this
     // situation is resolved by looking up the index again. So we'll follow the
     // old logic (just returning retry below)
-  } while (desc.status() == OpenStatus::Retry && retryIndex-- > 0);
+  } while (ld.desc_.status() == OpenStatus::Retry && retryIndex-- > 0);
 
-  switch (desc.status()) {
+  switch (ld.desc_.status()) {
   case OpenStatus::Ready: {
-    auto status =
-        readEntry(desc, addrEnd, decodeSizeHint(lr.sizeHint()), hk, value);
+    ld.status_ = readEntry(ld, addrEnd, decodeSizeHint(lr.sizeHint()), hk);
 
-    if (FOLLY_UNLIKELY(status == Status::DeviceError)) {
+    if (FOLLY_UNLIKELY(ld.status_ == Status::DeviceError)) {
       // Remove this item from index so no future lookup will
       // ever attempt to read this key. Reclaim will also not be
       // able to re-insert this item as it does not exist in index.
       index_->remove(hk.keyHash());
-    } else if (status == Status::ChecksumError) {
+    } else if (ld.status_ == Status::ChecksumError) {
       // In case we are getting transient checksum error, we will retry to read
       // the entry (S421120)
-      status =
-          readEntry(desc, addrEnd, decodeSizeHint(lr.sizeHint()), hk, value);
+      ld.status_ = readEntry(ld, addrEnd, decodeSizeHint(lr.sizeHint()), hk);
       XLOGF(ERR,
             "Retry reading an entry after checksum error. Return code: "
             "{}",
-            status);
+            ld.status_);
       retryReadCount_.inc();
 
-      if (status != Status::Ok) {
+      if (ld.status_ != Status::Ok) {
         // Still failing. Remove this item from index so no future lookup will
         // ever attempt to read this key. Reclaim will also not be
         // able to re-insert this item as it does not exist in index.
@@ -345,24 +338,38 @@ Status BlockCache::lookup(HashedKey hk, Buffer& value) {
       }
     }
 
-    if (status == Status::Ok) {
+    if (ld.status_ == Status::Ok) {
       regionManager_.touch(addrEnd.rid());
       succLookupCount_.inc();
     }
-    regionManager_.close(std::move(desc));
     lookupCount_.inc();
     if (reinsertionPolicy_) {
       reinsertionPolicy_->onLookup(hk.key());
     }
-    return status;
+    break;
   }
   case OpenStatus::Retry:
-    return Status::Retry;
+    ld.status_ = Status::Retry;
+    break;
   default:
-    // Open region never returns other statuses than above
+    // Open region never returns statuses other than what's above
     XDCHECK(false) << "unreachable";
-    return Status::DeviceError;
+    ld.status_ = Status::DeviceError;
+    break;
   }
+  return ld;
+}
+
+Status BlockCache::lookup(HashedKey hk, Buffer& value) {
+  auto ld = lookupInternal(hk);
+  if (ld.desc_.isReady()) {
+    regionManager_.close(std::move(ld.desc_));
+  }
+  if (ld.status_ == Status::Ok) {
+    value = std::move(ld.buffer_);
+    value.shrink(ld.valueSize_);
+  }
+  return ld.status_;
 }
 
 std::pair<Status, std::string> BlockCache::getRandomAlloc(Buffer& value) {
@@ -454,6 +461,21 @@ std::pair<Status, std::string> BlockCache::getRandomAlloc(Buffer& value) {
   return std::make_pair(Status::NotFound, "");
 }
 
+Status BlockCache::removeImpl(const HashedKey& hk, const Buffer& value) {
+  auto lr = index_->remove(hk.keyHash());
+  if (lr.found()) {
+    uint64_t removedObjectSize = decodeSizeHint(lr.sizeHint());
+    addHole(removedObjectSize);
+    usedSizeBytes_.sub(removedObjectSize);
+    succRemoveCount_.inc();
+    if (!value.isNull() && destructorCb_) {
+      destructorCb_(hk, value.view(), DestructorEvent::Removed);
+    }
+    return Status::Ok;
+  }
+  return Status::NotFound;
+}
+
 Status BlockCache::remove(HashedKey hk) {
   auto start = getSteadyClock();
   SCOPE_EXIT {
@@ -490,19 +512,7 @@ Status BlockCache::remove(HashedKey hk) {
     }
   }
 
-  auto lr = index_->remove(hk.keyHash());
-  if (lr.found()) {
-    uint64_t removedObjectSize = decodeSizeHint(lr.sizeHint());
-    holeSizeTotal_.add(removedObjectSize);
-    holeCount_.inc();
-    usedSizeBytes_.sub(removedObjectSize);
-    succRemoveCount_.inc();
-    if (!value.isNull() && destructorCb_) {
-      destructorCb_(hk, value.view(), DestructorEvent::Removed);
-    }
-    return Status::Ok;
-  }
-  return Status::NotFound;
+  return removeImpl(hk, value);
 }
 
 /**
@@ -515,7 +525,7 @@ Status BlockCache::remove(HashedKey hk) {
  *
  * If a checksum error is detected in an item's descriptor, the reclaim process
  * is aborted for the remaining items in the region, and their eviction
- * callbacks will not be invoked. If a cheksum error is detected in the value,
+ * callbacks will not be invoked. If a checksum error is detected in the value,
  * we can continue working on the remaining items as the metadata is still valid
  * and that is what we need to find the next item to evict/remove/reinsert.
  *
@@ -574,17 +584,18 @@ uint32_t BlockCache::onRegionReclaim(RegionId rid, BufferView buffer) {
         hk, value, entrySize, RelAddress{rid, offset}, desc);
     switch (reinsertionRes) {
     case AllocatorApiResult::EVICTED:
+    case AllocatorApiResult::EXPIRED:
       evictionCount++;
       usedSizeBytes_.sub(decodeSizeHint(encodeSizeHint(entrySize)));
       break;
     case AllocatorApiResult::REMOVED:
-      holeCount_.sub(1);
-      holeSizeTotal_.sub(decodeSizeHint(encodeSizeHint(entrySize)));
+      removeHole(decodeSizeHint(encodeSizeHint(entrySize)));
       break;
     default:
       break;
     }
-    if (destructorCb_ && reinsertionRes == AllocatorApiResult::EVICTED) {
+    if (destructorCb_ && (reinsertionRes == AllocatorApiResult::EVICTED ||
+                          reinsertionRes == AllocatorApiResult::EXPIRED)) {
       destructorCb_(hk, value, DestructorEvent::Recycled);
     } else {
       recordEvent(hk.key(), AllocatorApiEvent::NVM_EVICT, reinsertionRes,
@@ -640,8 +651,7 @@ void BlockCache::onRegionCleanup(RegionId rid, BufferView buffer) {
       evictionCount++;
       usedSizeBytes_.sub(decodeSizeHint(encodeSizeHint(entrySize)));
     } else {
-      holeCount_.sub(1);
-      holeSizeTotal_.sub(decodeSizeHint(encodeSizeHint(entrySize)));
+      removeHole(decodeSizeHint(encodeSizeHint(entrySize)));
     }
     if (destructorCb_ && removeRes) {
       destructorCb_(hk, value, DestructorEvent::Recycled);
@@ -673,19 +683,53 @@ std::optional<uint64_t> BlockCache::onKeyHashRetrievalFromLocation(
     return std::nullopt;
   }
 
-  // We only need to read EntryDesc
-  auto readSize = sizeof(EntryDesc);
+  EntryDesc entryDesc{};
+  uint8_t* entryEnd{nullptr};
+  {
+    SCOPE_EXIT { regionManager_.close(std::move(desc)); };
+    // We only need to read EntryDesc + key. (Key is just for integrity check).
+    // Since we don't know the key size before reading EntryDesc, let's just
+    // read enough buffer to cover most keys. If it's not enough, we can read
+    // more for the key, but that'll be rare cases.
+    auto readSize = std::min(512u, addrEnd.offset());
 
-  auto buffer =
-      regionManager_.read(desc, addrEnd.sub((uint32_t)readSize), readSize);
-  regionManager_.close(std::move(desc));
+    auto buffer = regionManager_.read(desc, addrEnd.sub(readSize), readSize);
+    if (buffer.isNull()) {
+      return std::nullopt;
+    }
 
-  if (buffer.isNull()) {
-    return std::nullopt;
+    entryEnd = buffer.data() + buffer.size();
+    entryDesc = *reinterpret_cast<EntryDesc*>(entryEnd - sizeof(EntryDesc));
+    // check if we have enough buffer read to cover the key
+    if (buffer.size() < sizeof(EntryDesc) + entryDesc.keySize) {
+      // re-read to cover the key. This should be just for the larger keys
+      readSize = sizeof(EntryDesc) + entryDesc.keySize;
+      if (readSize > addrEnd.offset()) {
+        // something's wrong with the key size. It's not within the region
+        // boundary
+        XLOGF(
+            ERR,
+            "Key size {} in item header is crossing the region boundary in "
+            "onKeyHashRetrievalFromLocation(). Region {} is likely corrupted. "
+            "Offset-end: {}, Physical-offset-end: {}, Header size: {}, Header "
+            "(hex): {}",
+            entryDesc.keySize, addrEnd.rid().index(), addrEnd.offset(),
+            regionManager_.physicalOffset(addrEnd), sizeof(EntryDesc),
+            folly::hexlify(
+                folly::ByteRange(entryEnd - sizeof(EntryDesc), entryEnd)));
+        return std::nullopt;
+      }
+      buffer = regionManager_.read(desc, addrEnd.sub(readSize), readSize);
+      if (buffer.isNull()) {
+        return std::nullopt;
+      }
+
+      // modify the address for these variables accordingly
+      entryEnd = buffer.data() + buffer.size();
+      entryDesc = *reinterpret_cast<EntryDesc*>(entryEnd - sizeof(EntryDesc));
+    }
   }
 
-  auto entryEnd = buffer.data() + buffer.size();
-  auto entryDesc = *reinterpret_cast<EntryDesc*>(entryEnd - sizeof(EntryDesc));
   if (entryDesc.csSelf != entryDesc.computeChecksum()) {
     XLOGF(ERR,
           "Item header checksum mismatch in onKeyHashRetrievalFromLocation(). "
@@ -746,8 +790,9 @@ void BlockCache::recordEvent(folly::StringPiece key,
                              AllocatorApiResult result,
                              uint32_t size,
                              const NvmItem* nvmItem) {
-  if (eventTracker_) {
-    if (!eventTracker_->sampleKey(key)) {
+  auto eventTracker = getEventTracker();
+  if (eventTracker) {
+    if (!eventTracker->sampleKey(key)) {
       return;
     }
     EventInfo eventInfo;
@@ -787,7 +832,7 @@ void BlockCache::recordEvent(folly::StringPiece key,
       }
     }
 
-    eventTracker_->record(eventInfo);
+    eventTracker->record(eventInfo);
   } else if (legacyEventTracker_.has_value()) {
     legacyEventTracker_->get().record(event, key, result, size);
   }
@@ -836,7 +881,7 @@ AllocatorApiResult BlockCache::reinsertOrRemoveItem(
     evictionLookupMissCounter_.inc();
     // Either item is not in index (NOT_FOUND) or the time has been
     // replaced by a newer item hence the current item is invalidated
-    // (INVALDIATED).
+    // (INVALIDATED).
     auto eventRes = !lr.found() ? AllocatorApiResult::NOT_FOUND
                                 : AllocatorApiResult::INVALIDATED;
     recordEvent(hk.key(), AllocatorApiEvent::NVM_REINSERT, eventRes, entrySize);
@@ -892,9 +937,8 @@ AllocatorApiResult BlockCache::reinsertOrRemoveItem(
           ? kDefaultItemPriority
           : std::min<uint16_t>(lr.currentHits(), numPriorities_ - 1);
 
-  uint32_t size = serializedSize(hk.key().size(), value.size());
-  auto [desc, addr] =
-      allocator_.allocate(size, priority, false /* canWait */, hk.keyHash());
+  auto [desc, size, addr] =
+      allocateImpl(hk, value.size(), priority, false /* canWait */);
 
   switch (desc.status()) {
   case OpenStatus::Ready:
@@ -920,14 +964,7 @@ AllocatorApiResult BlockCache::reinsertOrRemoveItem(
 
   // After allocation a region is opened for writing. Until we close it, the
   // region would not be reclaimed and index never gets an invalid entry.
-  const auto status = writeEntry(addr, size, hk, value);
-  if (status != Status::Ok) {
-    recordEvent(hk.key(), AllocatorApiEvent::NVM_REINSERT,
-                AllocatorApiResult::FAILED, entrySize);
-    reinsertionErrorCount_.inc();
-    return removeItem(false);
-  }
-
+  writeEntry(addr, size, hk, value);
   const auto replaced = index_->replaceIfMatch(hk.keyHash(),
                                                encodeRelAddress(addr.add(size)),
                                                encodeRelAddress(currAddr));
@@ -946,36 +983,79 @@ AllocatorApiResult BlockCache::reinsertOrRemoveItem(
   return AllocatorApiResult::REINSERTED;
 }
 
-Status BlockCache::writeEntry(RelAddress addr,
-                              uint32_t size,
-                              HashedKey hk,
-                              BufferView value) {
-  XDCHECK_LE(addr.offset() + size, regionManager_.regionSize());
-  XDCHECK_EQ(size % allocAlignSize_, 0ULL)
-      << folly::sformat(" alignSize={}, size={}", allocAlignSize_, size);
-  auto buffer = Buffer(size);
+std::tuple<RegionDescriptor, uint32_t, RelAddress> BlockCache::allocateImpl(
+    const HashedKey& hk,
+    const uint32_t valueSize,
+    const uint16_t priority,
+    const bool canWait) {
+  uint32_t size = serializedSize(hk.key().size(), valueSize);
+  auto [desc, addr] =
+      allocator_.allocate(size, priority, canWait, hk.keyHash());
+  if (desc.isReady()) {
+    XDCHECK_LE(addr.offset() + size, regionManager_.regionSize());
+    XDCHECK_EQ(size % allocAlignSize_, 0ULL)
+        << folly::sformat(" alignSize={}, size={}", allocAlignSize_, size);
+  }
+  return std::make_tuple(std::move(desc), size, std::move(addr));
+}
 
+folly::Expected<std::tuple<RegionDescriptor, uint32_t, RelAddress>, Status>
+BlockCache::allocateForInsert(const HashedKey& hk, const uint32_t valueSize) {
+  if (serializedSize(hk.key().size(), valueSize) > kMaxItemSize) {
+    allocErrorCount_.inc();
+    insertCount_.inc();
+    return folly::makeUnexpected(Status::Rejected);
+  }
+
+  // All newly inserted items are assigned with the lowest priority
+  auto retVal =
+      allocateImpl(hk, valueSize, kDefaultItemPriority, /* canWait */ true);
+  switch (std::get<0>(retVal).status()) {
+  case OpenStatus::Ready:
+    insertCount_.inc();
+    return std::move(retVal);
+  case OpenStatus::Error:
+    allocErrorCount_.inc();
+    insertCount_.inc();
+    return folly::makeUnexpected(Status::Rejected);
+  case OpenStatus::Retry:
+    allocRetryCount_.inc();
+    return folly::makeUnexpected(Status::Retry);
+  default:
+    XLOG(DFATAL) << "Unexpected OpenStatus";
+    return folly::makeUnexpected(Status::BadState);
+  }
+}
+
+/* static */ BlockCache::EntryDesc* BlockCache::writeEntryDescAndKey(
+    Buffer& buffer, const HashedKey& hk, uint32_t valueSize) {
   // Copy descriptor and the key to the end
   size_t descOffset = buffer.size() - sizeof(EntryDesc);
   auto desc = new (buffer.data() + descOffset)
-      EntryDesc(hk.key().size(), value.size(), hk.keyHash());
+      EntryDesc(hk.key().size(), valueSize, hk.keyHash());
+  buffer.copyFrom(descOffset - hk.key().size(), makeView(hk.key()));
+  return desc;
+}
+
+void BlockCache::writeEntry(RelAddress addr,
+                            uint32_t size,
+                            HashedKey hk,
+                            BufferView value) {
+  auto buffer = Buffer(size);
+  auto* desc = writeEntryDescAndKey(buffer, hk, value.size());
   if (checksumData_) {
     desc->cs = checksum(value);
   }
-
-  buffer.copyFrom(descOffset - hk.key().size(), makeView(hk.key()));
   buffer.copyFrom(0, value);
 
   regionManager_.write(addr, std::move(buffer));
   logicalWrittenCount_.add(hk.key().size() + value.size());
-  return Status::Ok;
 }
 
-Status BlockCache::readEntry(const RegionDescriptor& readDesc,
+Status BlockCache::readEntry(LookupData& ld,
                              RelAddress addrEnd,
                              uint32_t approxSize,
-                             HashedKey expected,
-                             Buffer& value) {
+                             HashedKey expected) {
   // Because region opened for read, nobody will reclaim it or modify. Safe
   // without locks.
 
@@ -997,7 +1077,7 @@ Status BlockCache::readEntry(const RegionDescriptor& readDesc,
   XDCHECK_GE(approxSize, folly::nextPowTwo(sizeof(EntryDesc)));
 
   auto buffer =
-      regionManager_.read(readDesc, addrEnd.sub(approxSize), approxSize);
+      regionManager_.read(ld.desc_, addrEnd.sub(approxSize), approxSize);
   if (buffer.isNull()) {
     return Status::DeviceError;
   }
@@ -1034,25 +1114,26 @@ Status BlockCache::readEntry(const RegionDescriptor& readDesc,
     buffer.trimStart(buffer.size() - size);
   } else if (buffer.size() < size) {
     // Read less than actual size. Read again with proper buffer.
-    buffer = regionManager_.read(readDesc, addrEnd.sub(size), size);
+    buffer = regionManager_.read(ld.desc_, addrEnd.sub(size), size);
     if (buffer.isNull()) {
       return Status::DeviceError;
     }
   }
 
-  value = std::move(buffer);
-  value.shrink(desc.valueSize);
-  if (checksumData_ && desc.cs != checksum(value.view())) {
+  ld.buffer_ = std::move(buffer);
+  ld.valueSize_ = desc.valueSize;
+  auto slice = ld.buffer_.view().slice(0, desc.valueSize);
+  if (checksumData_ && desc.cs != checksum(slice)) {
     XLOG_N_PER_MS(ERR, 10, 10'000) << folly::sformat(
         "Item value checksum mismatch in readEntry() looking up key {} in "
         "Region {}. Expected: {}, Actual: {}, Offset: {}, Physical-offset: {}, "
         "Value-size: {} Payload (hex): {}",
-        key, addrEnd.rid().index(), desc.cs, checksum(value.view()),
+        key, addrEnd.rid().index(), desc.cs, checksum(slice),
         addrEnd.offset() - size, regionManager_.physicalOffset(addrEnd) - size,
-        value.size(),
+        slice.size(),
         folly::hexlify(
-            folly::ByteRange(value.data(), value.data() + value.size())));
-    value.reset();
+            folly::ByteRange(slice.data(), slice.data() + slice.size())));
+    ld.buffer_.reset();
     lookupValueChecksumErrorCount_.inc();
     return Status::ChecksumError;
   }
@@ -1230,4 +1311,14 @@ serialization::BlockCacheConfig BlockCache::serializeConfig(
   *serializedConfig.version() = kFormatVersion;
   return serializedConfig;
 }
+
+void BlockCache::addHole(uint32_t size) const {
+  holeCount_.inc();
+  holeSizeTotal_.add(size);
+}
+void BlockCache::removeHole(uint32_t size) const {
+  holeCount_.sub(1);
+  holeSizeTotal_.sub(size);
+}
+
 } // namespace facebook::cachelib::navy

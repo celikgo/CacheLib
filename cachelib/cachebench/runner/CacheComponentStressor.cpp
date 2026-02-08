@@ -104,9 +104,7 @@ CacheComponentStressor::CacheComponentStressor(
 
   auto cache =
       RAMCacheComponent::create(std::move(lruConfig), std::move(poolConfig));
-  XCHECK(cache.hasValue())
-      << "Error code: " << static_cast<int8_t>(cache.error().code_) << ": "
-      << cache.error().error_;
+  XCHECK(cache.hasValue()) << cache.error();
   cache_ = std::make_unique<RAMCacheComponent>(std::move(cache).value());
 }
 
@@ -392,7 +390,7 @@ folly::coro::Task<OpResultType> CacheComponentStressor::deleteKey(
 void CacheComponentStressor::populateItem(AllocatedHandle& handle,
                                           const std::string& itemValue) {
   // For the generic interface, we'll just store the itemValue or hardcoded
-  // string Note: This is simplified compared to Cache<Allocator> which has
+  // string. NOTE: This is simplified compared to Cache<Allocator> which has
   // special methods for setting uint64 and string values with consistency
   // checking
   char* data = reinterpret_cast<char*>(handle->getMemory());
@@ -401,6 +399,7 @@ void CacheComponentStressor::populateItem(AllocatedHandle& handle,
   // Copy the item value into the handle's memory
   auto& value = itemValue.empty() ? hardcodedString_ : itemValue;
   size_t copySize = std::min(value.size(), static_cast<size_t>(dataSize));
+  XCHECK_GT(copySize, 0ULL);
   std::strncpy(data, value.c_str(), copySize);
   data[copySize - 1] = '\0';
 }

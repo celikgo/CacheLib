@@ -186,7 +186,7 @@ folly::coro::Task<UnitResult> RAMCacheComponent::insert(
     co_return makeError(Error::Code::INSERT_FAILED, e.what());
   }
 
-  handle.~AllocatedHandle();
+  auto _ = std::move(handle);
   co_return folly::unit;
 }
 
@@ -215,7 +215,7 @@ RAMCacheComponent::insertOrReplace(AllocatedHandle&& handle) {
     co_return makeError(Error::Code::INSERT_FAILED, e.what());
   }
 
-  handle.~AllocatedHandle();
+  auto _ = std::move(handle);
   if (replacedHandle) {
     co_return toGenericHandle<AllocatedHandle>(*this, replacedHandle);
   } else {
@@ -261,12 +261,17 @@ folly::coro::Task<UnitResult> RAMCacheComponent::remove(ReadHandle&& handle) {
     co_return makeError(Error::Code::REMOVE_FAILED, e.what());
   }
 
-  handle.~ReadHandle();
+  auto _ = std::move(handle);
   co_return folly::unit;
 }
 
 RAMCacheComponent::RAMCacheComponent(LruAllocatorConfig&& config)
     : cache_(std::make_unique<LruAllocator>(std::move(config))) {}
+
+UnitResult RAMCacheComponent::writeBack(CacheItem& /* item */) {
+  /* no-op, writing to the RAM buffer is equivalent to writing back */
+  return folly::unit;
+}
 
 folly::coro::Task<void> RAMCacheComponent::release(interface::CacheItem& item,
                                                    bool inserted) {

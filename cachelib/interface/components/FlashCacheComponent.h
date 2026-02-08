@@ -20,6 +20,7 @@
 #include "cachelib/navy/block_cache/BlockCache.h"
 
 namespace facebook::cachelib::interface {
+class FlashCacheItem;
 
 /**
  * A cache component that uses Cachelib's BlockCache flash cache without RAM
@@ -66,9 +67,28 @@ class FlashCacheComponent : public CacheComponent {
 
   FlashCacheComponent(std::string&& name, navy::BlockCache::Config&& config);
 
+  // Runs func() on a RegionManager worker fiber. Should not be called from an
+  // existing region manager worker fiber!
+  template <typename FuncT,
+            typename ReturnT = std::invoke_result_t<FuncT>,
+            typename CleanupFuncT = std::function<void(ReturnT)>>
+  folly::coro::Task<ReturnT> onWorkerThread(FuncT&& func,
+                                            CleanupFuncT&& cleanup = {});
+
+  using AllocData =
+      std::tuple<navy::RegionDescriptor, uint32_t, navy::RelAddress>;
+  folly::coro::Task<Result<AllocData>> allocateImpl(const HashedKey& key,
+                                                    uint32_t valueSize);
+  bool writeBackImpl(CacheItem& item, bool allowReplace);
+  folly::coro::Task<UnitResult> insertImpl(AllocatedHandle&& handle,
+                                           bool allowReplace);
+
   // ------------------------------ Interface ------------------------------ //
 
+  UnitResult writeBack(CacheItem& item) override;
   folly::coro::Task<void> release(CacheItem& item, bool inserted) override;
+
+  friend class FlashCacheItem;
 };
 
 } // namespace facebook::cachelib::interface

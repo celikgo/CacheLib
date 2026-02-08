@@ -20,6 +20,7 @@
 #include <folly/Format.h>
 #include <folly/Function.h>
 #include <folly/ThreadLocal.h>
+#include <folly/container/Reserve.h>
 #include <folly/experimental/io/AsyncIO.h>
 #include <folly/experimental/io/IoUring.h>
 #include <folly/fibers/TimedMutex.h>
@@ -221,6 +222,10 @@ class CompletionHandler : public folly::EventHandler {
   }
 
   ~CompletionHandler() override { unregisterHandler(); }
+  CompletionHandler(const CompletionHandler&) = delete;
+  CompletionHandler& operator=(const CompletionHandler&) = delete;
+  CompletionHandler(CompletionHandler&&) = delete;
+  CompletionHandler& operator=(CompletionHandler&&) = delete;
 
   void handlerReady(uint16_t /*events*/) noexcept override;
 
@@ -313,6 +318,9 @@ class FileDevice : public Device {
 
   FileDevice(const FileDevice&) = delete;
   FileDevice& operator=(const FileDevice&) = delete;
+  FileDevice(FileDevice&&) = delete;
+  FileDevice& operator=(FileDevice&&) = delete;
+  ~FileDevice() override = default;
 
  private:
   IoContext* getIoContext();
@@ -368,6 +376,8 @@ class MemoryDevice final : public Device {
         buffer_{std::make_unique<uint8_t[]>(size)} {}
   MemoryDevice(const MemoryDevice&) = delete;
   MemoryDevice& operator=(const MemoryDevice&) = delete;
+  MemoryDevice(MemoryDevice&&) = delete;
+  MemoryDevice& operator=(MemoryDevice&&) = delete;
   ~MemoryDevice() override = default;
 
  private:
@@ -621,6 +631,11 @@ IOReq::IOReq(IoContext& context,
   uint32_t idx = 0;
   if (fvec.size() > 1) {
     // For RAID devices
+    // Pre-allocate: number of ops equals the number of stripes touched
+    uint64_t startStripe = offset / stripeSize;
+    uint64_t endStripe = (offset + size - 1) / stripeSize;
+    folly::grow_capacity_by(ops_,
+                            static_cast<size_t>(endStripe - startStripe + 1));
     while (size > 0) {
       uint64_t stripe = offset / stripeSize;
       uint32_t fdIdx = stripe % fvec.size();
@@ -1300,17 +1315,17 @@ std::unique_ptr<Device> createFileDevice(
 
   std::sort(filePaths.begin(), filePaths.end());
   std::vector<folly::File> fileVec;
+  fileVec.reserve(filePaths.size());
   for (const auto& path : filePaths) {
-    folly::File f;
     try {
       // TODO: beyondsora implement
-      f = openCacheFile(path, fdSize, truncateFile, isExclusiveOwner);
+      fileVec.emplace_back(
+          openCacheFile(path, fdSize, truncateFile, isExclusiveOwner));
     } catch (const std::exception& e) {
       XLOG(ERR) << "Exception in openCacheFile(" << path << "): " << e.what()
                 << ". Errno: " << errno;
       throw;
     }
-    fileVec.push_back(std::move(f));
   }
 
   return createDirectIoFileDevice(std::move(fileVec),

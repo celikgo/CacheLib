@@ -40,6 +40,7 @@
 #include "cachelib/common/EventInterface.h"
 #include "cachelib/common/Exceptions.h"
 #include "cachelib/common/Hash.h"
+#include "cachelib/common/PercentileStats.h"
 #include "cachelib/common/Profiled.h"
 #include "cachelib/common/Time.h"
 #include "cachelib/common/Utils.h"
@@ -268,6 +269,13 @@ class NvmCache {
 
   bool updateMaxRateForDynamicRandomAP(uint64_t maxRate) {
     return navyCache_->updateMaxRateForDynamicRandomAP(maxRate);
+  }
+
+  // Set the EventTracker for all underlying NVM engines
+  void setEventTracker(std::shared_ptr<EventTracker> tracker) {
+    if (navyCache_) {
+      navyCache_->setEventTracker(std::move(tracker));
+    }
   }
 
   // This lock is to protect concurrent NvmCache evictCB and CacheAllocator
@@ -1094,8 +1102,11 @@ std::unique_ptr<NvmItem> NvmCache<C>::makeNvmItem(const Item& item) {
   }
 
   if (config_.makeBlobCb) {
-    std::vector<BufferedBlob> bufferedBlobs =
-        config_.makeBlobCb(item, chainedItemRange);
+    std::vector<BufferedBlob> bufferedBlobs;
+    {
+      util::LatencyTracker tracker(stats().nvmMakeBlobCbLatency_);
+      bufferedBlobs = config_.makeBlobCb(item, chainedItemRange);
+    }
     if (bufferedBlobs.empty()) {
       return nullptr;
     }
@@ -1357,20 +1368,22 @@ typename NvmCache<C>::WriteHandle NvmCache<C>::createItem(
       cache_.addChainedItem(it, std::move(chainedIt));
       XDCHECK(it->hasChainedItem());
     }
-    if (!config_.makeObjCb(
-            nvmItem, *it,
-            CacheAPIWrapperForNvm<C>::viewAsWritableChainedAllocsRange(cache_,
-                                                                       *it))) {
-      return nullptr;
-    } else {
-      // Often times an object needs its associated destructor to be triggered
-      // to release resources (such as memory) properly. Today we use removeCB
-      // or ItemDestructor to represent this logic for cachelib's object-cache.
-      // Thus, we need to ensure these callbacks are always invoked when this
-      // item goes away even if the item had never been inserted into cache (aka
-      // not visible to other threads).
-      it.unmarkNascent();
+    {
+      util::LatencyTracker tracker(stats().nvmMakeObjCbLatency_);
+      if (!config_.makeObjCb(
+              nvmItem, *it,
+              CacheAPIWrapperForNvm<C>::viewAsWritableChainedAllocsRange(
+                  cache_, *it))) {
+        return nullptr;
+      }
     }
+    // Often times an object needs its associated destructor to be triggered
+    // to release resources (such as memory) properly. Today we use removeCB
+    // or ItemDestructor to represent this logic for cachelib's object-cache.
+    // Thus, we need to ensure these callbacks are always invoked when this
+    // item goes away even if the item had never been inserted into cache (aka
+    // not visible to other threads).
+    it.unmarkNascent();
     it->markNvmClean();
   } else {
     XDCHECK_LE(pBlob.data.size(), getStorageSizeInNvm(*it));
@@ -1490,6 +1503,7 @@ std::unique_ptr<folly::IOBuf> NvmCache<C>::createItemAsIOBuf(
   }
   // If the customized callback is set, we'll call it to propagate the payload.
   if (useCustomCb) {
+    util::LatencyTracker tracker(stats().nvmMakeObjCbLatency_);
     if (!config_.makeObjCb(nvmItem, *item,
                            viewAsWritableChainedAllocsRange(head.get()))) {
       return nullptr;
