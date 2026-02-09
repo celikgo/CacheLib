@@ -1,4 +1,4 @@
-# CacheLib gRPC Server v1.2.1
+# CacheLib gRPC Server v1.2.2
 
 A high-performance, Redis-compatible caching server powered by [CacheLib](https://github.com/facebook/CacheLib) with gRPC interface.
 
@@ -8,20 +8,20 @@ A high-performance, Redis-compatible caching server powered by [CacheLib](https:
 
 ```bash
 # Pull the latest image
-docker pull ghcr.io/celikgo/cachelib-grpc-server:1.2.1
+docker pull ghcr.io/celikgo/cachelib-grpc-server:1.2.2
 
 # Run the server (1GB RAM cache)
-docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.2.1
+docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.2.2
 
 # Run with custom cache size (4GB)
 docker run -d --name cachelib -p 50051:50051 \
-  ghcr.io/celikgo/cachelib-grpc-server:1.2.1 \
+  ghcr.io/celikgo/cachelib-grpc-server:1.2.2 \
   --cache_size=4294967296
 
 # Run with hybrid caching (DRAM + SSD)
 docker run -d --name cachelib -p 50051:50051 \
   -v /path/to/ssd:/data/nvm \
-  ghcr.io/celikgo/cachelib-grpc-server:1.2.1 \
+  ghcr.io/celikgo/cachelib-grpc-server:1.2.2 \
   --cache_size=2147483648 \
   --enable_nvm=true \
   --nvm_path=/data/nvm/cache.dat \
@@ -190,7 +190,7 @@ Response:
   "deleteCount": "50",
   "evictionCount": "0",
   "uptimeSeconds": "3600",
-  "version": "1.2.1"
+  "version": "1.2.2"
 }
 ```
 
@@ -221,7 +221,7 @@ Response:
 version: '3.8'
 services:
   cachelib:
-    image: ghcr.io/celikgo/cachelib-grpc-server:1.2.1
+    image: ghcr.io/celikgo/cachelib-grpc-server:1.2.2
     ports:
       - "50051:50051"
     command: ["--cache_size=2147483648"]
@@ -410,7 +410,7 @@ CacheLib supports transparent hybrid caching where hot items stay in DRAM and wa
 ```bash
 docker run -d -p 50051:50051 \
   -v /mnt/nvme:/data/nvm \
-  ghcr.io/celikgo/cachelib-grpc-server:1.2.1 \
+  ghcr.io/celikgo/cachelib-grpc-server:1.2.2 \
   --cache_size=8589934592 \
   --enable_nvm=true \
   --nvm_path=/data/nvm/cache.dat \
@@ -473,13 +473,13 @@ docker build -t cachelib-grpc-server -f standalone_server/Dockerfile .
 | Tag | Description |
 |-----|-------------|
 | `latest` | Latest stable release |
-| `1.2.1` | Current version with all bug fixes |
+| `1.2.2` | Current version with all bug fixes |
 
 **Registry:** `ghcr.io/celikgo/cachelib-grpc-server`
 
 ## Changelog
 
-### v1.2.1
+### v1.2.2
 - Fixed `setCount` and `getCount` stats visibility with sequential consistency
 - All atomic counters now use `memory_order_seq_cst` for guaranteed cross-thread visibility
 
@@ -516,7 +516,7 @@ docker build -t cachelib-grpc-server -f standalone_server/Dockerfile .
 Increase log verbosity for debugging:
 
 ```bash
-docker run -d -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.2.1 --log_level=DBG
+docker run -d -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.2.2 --log_level=DBG
 ```
 
 ## License
