@@ -23,9 +23,11 @@
 #include <gflags/gflags.h>
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/health_check_service_interface.h>
+#include <grpcpp/ext/proto_server_reflection_plugin.h>
 
 #include "CacheManager.h"
 #include "CacheServiceImpl.h"
+#include "MetricsServer.h"
 
 // Server configuration flags
 DEFINE_string(address, "0.0.0.0", "Server bind address");
@@ -57,6 +59,9 @@ DEFINE_string(
     log_level,
     "INFO",
     "Log level (DBG, INFO, WARN, ERR, CRITICAL)");
+
+// Metrics configuration
+DEFINE_int32(metrics_port, 9090, "Prometheus metrics HTTP port (0 = disabled)");
 
 // Global server pointer for signal handling
 std::unique_ptr<grpc::Server> g_server;
@@ -152,6 +157,9 @@ int main(int argc, char** argv) {
   // Enable built-in health checking
   grpc::EnableDefaultHealthCheckService(true);
 
+  // Enable server reflection for service discovery (e.g., grpcurl)
+  grpc::reflection::InitProtoReflectionServerBuilderPlugin();
+
   // Set max message size (default 4MB, but configurable)
   builder.SetMaxReceiveMessageSize(static_cast<int>(FLAGS_max_item_size) + 1024);
   builder.SetMaxSendMessageSize(static_cast<int>(FLAGS_max_item_size) + 1024);
@@ -166,6 +174,17 @@ int main(int argc, char** argv) {
 
   XLOG(INFO) << "gRPC server listening on " << serverAddress;
 
+  // Start Prometheus metrics server if enabled
+  std::unique_ptr<cachelib::grpc_server::MetricsServer> metricsServer;
+  if (FLAGS_metrics_port > 0) {
+    metricsServer = std::make_unique<cachelib::grpc_server::MetricsServer>(
+        cacheManager, static_cast<uint16_t>(FLAGS_metrics_port));
+    if (!metricsServer->start()) {
+      XLOG(WARN) << "Failed to start metrics server on port "
+                 << FLAGS_metrics_port;
+    }
+  }
+
   // Set up signal handlers for graceful shutdown
   std::signal(SIGINT, signalHandler);
   std::signal(SIGTERM, signalHandler);
@@ -174,6 +193,11 @@ int main(int argc, char** argv) {
   g_server->Wait();
 
   XLOG(INFO) << "Server stopped, cleaning up...";
+
+  // Stop metrics server
+  if (metricsServer) {
+    metricsServer->stop();
+  }
 
   // Cleanup
   cacheManager->shutdown();

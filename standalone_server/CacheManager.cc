@@ -284,6 +284,18 @@ std::vector<std::string> CacheManager::multiSet(
   return failedKeys;
 }
 
+int32_t CacheManager::multiDelete(const std::vector<std::string>& keys) {
+  int32_t deletedCount = 0;
+
+  for (const auto& key : keys) {
+    if (remove(key)) {
+      ++deletedCount;
+    }
+  }
+
+  return deletedCount;
+}
+
 // =============================================================================
 // Atomic Operations
 // =============================================================================
@@ -399,7 +411,8 @@ IncrDecrResult CacheManager::decrement(std::string_view key,
 CASResult CacheManager::compareAndSwap(std::string_view key,
                                         std::string_view expectedValue,
                                         std::string_view newValue,
-                                        int32_t ttlSeconds) {
+                                        uint32_t ttlSeconds,
+                                        bool keepTtl) {
   CASResult result;
 
   if (!cache_) {
@@ -425,9 +438,10 @@ CASResult CacheManager::compareAndSwap(std::string_view key,
     return result;
   }
 
-  // Get existing TTL if ttlSeconds is 0
-  uint32_t effectiveTtl = static_cast<uint32_t>(ttlSeconds);
-  if (ttlSeconds == 0) {
+  // Determine effective TTL
+  uint32_t effectiveTtl = ttlSeconds;
+  if (keepTtl) {
+    // Preserve existing TTL: calculate remaining time from expiry
     uint32_t expiryTime = existingHandle->getExpiryTime();
     if (expiryTime > 0) {
       uint32_t now = static_cast<uint32_t>(
@@ -436,11 +450,15 @@ CASResult CacheManager::compareAndSwap(std::string_view key,
               .count());
       if (expiryTime > now) {
         effectiveTtl = expiryTime - now;
+      } else {
+        effectiveTtl = 0;
       }
+    } else {
+      // No expiration was set, keep it that way
+      effectiveTtl = 0;
     }
-  } else if (ttlSeconds < 0) {
-    effectiveTtl = 0;  // No expiration
   }
+  // Otherwise use ttlSeconds directly (0 = no expiration, matching Set)
 
   // Values match, perform swap
   if (set(key, newValue, effectiveTtl)) {

@@ -218,6 +218,8 @@ target_link_libraries(cache_service
 # Create the main server executable
 add_executable(cachelib-grpc-server
   server.cc
+  MetricsServer.cc
+  MetricsServer.h
 )
 target_link_libraries(cachelib-grpc-server
   cache_service
@@ -226,6 +228,7 @@ target_link_libraries(cachelib-grpc-server
   cachelib
   Folly::folly
   gRPC::grpc++
+  gRPC::grpc++_reflection
   glog::glog
   gflags
   Threads::Threads

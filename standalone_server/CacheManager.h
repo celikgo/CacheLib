@@ -30,7 +30,7 @@ namespace cachelib {
 namespace grpc_server {
 
 // Server version
-constexpr const char* kServerVersion = "1.2.2";
+constexpr const char* kServerVersion = "1.3.0";
 
 // Configuration for the cache manager
 struct CacheConfig {
@@ -193,6 +193,9 @@ class CacheManager {
   std::vector<std::string> multiSet(
       const std::vector<std::tuple<std::string, std::string, uint32_t>>& items);
 
+  // Delete multiple keys, returns number of keys that existed and were deleted
+  int32_t multiDelete(const std::vector<std::string>& keys);
+
   // ---------------------------------------------------------------------------
   // Atomic Operations
   // ---------------------------------------------------------------------------
@@ -211,7 +214,8 @@ class CacheManager {
       std::string_view key,
       std::string_view expectedValue,
       std::string_view newValue,
-      int32_t ttlSeconds = 0);
+      uint32_t ttlSeconds = 0,
+      bool keepTtl = false);
 
   // ---------------------------------------------------------------------------
   // TTL Operations

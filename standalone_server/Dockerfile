@@ -80,6 +80,13 @@ RUN git clone --recurse-submodules -b ${GRPC_VERSION} --depth 1 https://github.c
     cd /build && \
     rm -rf grpc
 
+# Download grpc_health_probe binary for container health checks
+RUN GRPC_HEALTH_PROBE_VERSION=v0.4.25 && \
+    ARCH=$(dpkg --print-architecture) && \
+    wget -qO/usr/local/bin/grpc_health_probe \
+      "https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/${GRPC_HEALTH_PROBE_VERSION}/grpc_health_probe-linux-${ARCH}" && \
+    chmod +x /usr/local/bin/grpc_health_probe
+
 # NOTE: NOT installing liburing - folly's io_uring support requires
 # kernel features not available in Docker VM. By not having liburing,
 # folly will build without io_uring support.
@@ -221,6 +228,9 @@ COPY --from=builder /opt/getdeps-install/wangle/lib/*.so* /usr/local/lib/
 COPY --from=builder /opt/getdeps-install/mvfst/lib/*.so* /usr/local/lib/
 COPY --from=builder /opt/getdeps-install/liboqs-*/lib/*.so* /usr/local/lib/
 
+# Copy grpc_health_probe for health checks
+COPY --from=builder /usr/local/bin/grpc_health_probe /usr/local/bin/
+
 # Copy proto file for reference
 COPY --from=builder /build/CacheLib/standalone_server/proto/cache.proto /opt/cachelib/proto/
 
@@ -236,8 +246,9 @@ USER cachelib
 # Set library path
 ENV LD_LIBRARY_PATH="/opt/cachelib/lib:/usr/local/lib"
 
-# Expose gRPC port
+# Expose gRPC port and Prometheus metrics port
 EXPOSE 50051
+EXPOSE 9090
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

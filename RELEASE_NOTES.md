@@ -1,5 +1,38 @@
 # CacheLib gRPC Server - Release Notes
 
+## v1.3.0 (2026-02-09)
+
+### New Features
+
+- **gRPC Server Reflection**: Service discovery via `grpcurl` without proto files
+  - `grpcurl -plaintext localhost:50051 list` now works out of the box
+- **MultiDelete RPC**: Batch delete multiple keys in a single RPC call
+  - Returns deleted count and not-found count
+- **Pipeline Streaming RPC**: Bidirectional streaming for batching mixed operations
+  - Supports Get, Set, Delete, and Exists in a single stream
+  - Each request/response carries a `sequence_id` for correlation
+- **Prometheus Metrics Endpoint**: HTTP `/metrics` endpoint on port 9090
+  - Exposes cache size, hit rate, operation counters, NVM stats, uptime
+  - Compatible with Prometheus scraping and Grafana dashboards
+  - Configurable via `--metrics_port` flag (0 to disable)
+- **Container Health Probe**: `grpc_health_probe` binary bundled in Docker image
+  - Enables native Kubernetes/Docker health checks
+  - Docker HEALTHCHECK directive pre-configured
+
+### Improvements
+
+- **CAS TTL Convention Fix**: `CompareAndSwap` now uses `ttl_seconds=0` for no expiration, consistent with Set/SetNX/Increment/Decrement
+  - New `keep_ttl` field preserves existing TTL when updating value
+  - **Breaking change**: Previously `0 = keep existing TTL, -1 = no expiry`; now `0 = no expiry` (matching all other operations)
+
+### Docker
+
+- Prometheus metrics port (9090) exposed in Dockerfile
+- `grpc_health_probe` binary included for container health checks
+- HEALTHCHECK directive uses `grpc_health_probe` for reliable health monitoring
+
+---
+
 ## v1.2.2 (2026-02-09)
 
 ### Multi-Architecture Support

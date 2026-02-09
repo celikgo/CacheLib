@@ -1,4 +1,4 @@
-# CacheLib gRPC Server v1.2.2
+# CacheLib gRPC Server v1.3.0
 
 A high-performance, Redis-compatible caching server powered by [CacheLib](https://github.com/facebook/CacheLib) with gRPC interface.
 
@@ -8,20 +8,20 @@ A high-performance, Redis-compatible caching server powered by [CacheLib](https:
 
 ```bash
 # Pull the latest image
-docker pull ghcr.io/celikgo/cachelib-grpc-server:1.2.2
+docker pull ghcr.io/celikgo/cachelib-grpc-server:1.3.0
 
 # Run the server (1GB RAM cache)
-docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.2.2
+docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.3.0
 
 # Run with custom cache size (4GB)
 docker run -d --name cachelib -p 50051:50051 \
-  ghcr.io/celikgo/cachelib-grpc-server:1.2.2 \
+  ghcr.io/celikgo/cachelib-grpc-server:1.3.0 \
   --cache_size=4294967296
 
 # Run with hybrid caching (DRAM + SSD)
 docker run -d --name cachelib -p 50051:50051 \
   -v /path/to/ssd:/data/nvm \
-  ghcr.io/celikgo/cachelib-grpc-server:1.2.2 \
+  ghcr.io/celikgo/cachelib-grpc-server:1.3.0 \
   --cache_size=2147483648 \
   --enable_nvm=true \
   --nvm_path=/data/nvm/cache.dat \
@@ -35,6 +35,12 @@ docker run -d --name cachelib -p 50051:50051 \
 grpcurl -plaintext localhost:50051 cachelib.grpc.CacheService/Ping
 
 # Response: {"message":"PONG","timestamp":"1706000000000"}
+
+# List available services (v1.3.0+ — server reflection)
+grpcurl -plaintext localhost:50051 list
+
+# Check Prometheus metrics (v1.3.0+)
+curl http://localhost:9090/metrics
 ```
 
 ## Features
@@ -48,6 +54,7 @@ grpcurl -plaintext localhost:50051 cachelib.grpc.CacheService/Ping
 | **Exists** | Check if key exists |
 | **MultiGet** | Batch retrieve multiple keys |
 | **MultiSet** | Batch store multiple key-values |
+| **MultiDelete** | Batch delete multiple keys |
 
 ### Redis-Parity Features (v1.2.0+)
 | Feature | Description | Use Case |
@@ -59,12 +66,18 @@ grpcurl -plaintext localhost:50051 cachelib.grpc.CacheService/Ping
 | **Touch** | Update TTL only | Session extension |
 | **CompareAndSwap** | Conditional update | Optimistic locking |
 
+### Streaming (v1.3.0+)
+| Feature | Description | Use Case |
+|---------|-------------|----------|
+| **Pipeline** | Bidirectional streaming | Batch mixed operations in one stream |
+
 ### Administration
 | Operation | Description |
 |-----------|-------------|
 | **Ping** | Health check |
 | **Stats** | Cache statistics and metrics |
 | **Flush** | Clear all keys |
+| **Prometheus** | `GET /metrics` on port 9090 |
 
 ## API Examples
 
@@ -156,6 +169,10 @@ grpcurl -plaintext -d '{"key":"version","expected_value":"djE=","new_value":"djI
 
 # Response if successful: {"success":true,"actualValue":"djI="}
 # Response if mismatch: {"success":false,"actualValue":"djM="}
+
+# CAS with keep_ttl (v1.3.0+) — preserve existing TTL
+grpcurl -plaintext -d '{"key":"version","expected_value":"djI=","new_value":"djM=","keep_ttl":true}' \
+  localhost:50051 cachelib.grpc.CacheService/CompareAndSwap
 ```
 
 ### Batch Operations
@@ -168,6 +185,28 @@ grpcurl -plaintext -d '{"keys":["user:1","user:2","user:3"]}' \
 # MultiSet
 grpcurl -plaintext -d '{"items":[{"key":"k1","value":"djE=","ttl_seconds":60},{"key":"k2","value":"djI=","ttl_seconds":60}]}' \
   localhost:50051 cachelib.grpc.CacheService/MultiSet
+
+# MultiDelete (v1.3.0+)
+grpcurl -plaintext -d '{"keys":["k1","k2","k3"]}' \
+  localhost:50051 cachelib.grpc.CacheService/MultiDelete
+```
+
+### Pipeline Streaming (v1.3.0+)
+
+```bash
+# Send multiple operations in a single stream
+grpcurl -plaintext localhost:50051 cachelib.grpc.CacheService/Pipeline -d \
+  '{"sequence_id":1,"set":{"key":"a","value":"Yg==","ttl_seconds":60}}
+   {"sequence_id":2,"get":{"key":"a"}}
+   {"sequence_id":3,"delete":{"key":"a"}}
+   {"sequence_id":4,"exists":{"key":"a"}}'
+```
+
+### Prometheus Metrics (v1.3.0+)
+
+```bash
+# Scrape Prometheus metrics
+curl http://localhost:9090/metrics
 ```
 
 ### Cache Statistics
@@ -190,7 +229,7 @@ Response:
   "deleteCount": "50",
   "evictionCount": "0",
   "uptimeSeconds": "3600",
-  "version": "1.2.2"
+  "version": "1.3.0"
 }
 ```
 
@@ -214,6 +253,7 @@ Response:
 | `--lru_refresh_time` | `60` | LRU refresh time (seconds) |
 | `--max_item_size` | `4194304` (4MB) | Maximum item size |
 | `--log_level` | `INFO` | Log level (DBG,INFO,WARN,ERR) |
+| `--metrics_port` | `9090` | Prometheus metrics HTTP port (0 = disabled) |
 
 ### Docker Compose
 
@@ -221,9 +261,10 @@ Response:
 version: '3.8'
 services:
   cachelib:
-    image: ghcr.io/celikgo/cachelib-grpc-server:1.2.2
+    image: ghcr.io/celikgo/cachelib-grpc-server:1.3.0
     ports:
       - "50051:50051"
+      - "9090:9090"    # Prometheus metrics
     command: ["--cache_size=2147483648"]
     healthcheck:
       test: ["CMD", "grpc_health_probe", "-addr=:50051"]
@@ -410,7 +451,7 @@ CacheLib supports transparent hybrid caching where hot items stay in DRAM and wa
 ```bash
 docker run -d -p 50051:50051 \
   -v /mnt/nvme:/data/nvm \
-  ghcr.io/celikgo/cachelib-grpc-server:1.2.2 \
+  ghcr.io/celikgo/cachelib-grpc-server:1.3.0 \
   --cache_size=8589934592 \
   --enable_nvm=true \
   --nvm_path=/data/nvm/cache.dat \
@@ -473,11 +514,21 @@ docker build -t cachelib-grpc-server -f standalone_server/Dockerfile .
 | Tag | Description |
 |-----|-------------|
 | `latest` | Latest stable release |
-| `1.2.2` | Current version with all bug fixes |
+| `1.3.0` | Current version — reflection, Pipeline, metrics |
+| `1.2.2` | Multi-arch support, upstream sync |
 
 **Registry:** `ghcr.io/celikgo/cachelib-grpc-server`
 
 ## Changelog
+
+### v1.3.0
+- gRPC server reflection (service discovery without proto files)
+- MultiDelete RPC for batch key deletion
+- Pipeline bidirectional streaming for mixed operations
+- Prometheus metrics endpoint (`GET /metrics` on port 9090)
+- `grpc_health_probe` bundled in Docker image
+- CAS TTL convention fix: `0 = no expiry` (consistent with Set/SetNX)
+- New `keep_ttl` field in CompareAndSwap to preserve existing TTL
 
 ### v1.2.2
 - Fixed `setCount` and `getCount` stats visibility with sequential consistency
@@ -516,7 +567,7 @@ docker build -t cachelib-grpc-server -f standalone_server/Dockerfile .
 Increase log verbosity for debugging:
 
 ```bash
-docker run -d -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.2.2 --log_level=DBG
+docker run -d -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.3.0 --log_level=DBG
 ```
 
 ## License

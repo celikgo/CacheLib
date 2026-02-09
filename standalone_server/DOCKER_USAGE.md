@@ -2,7 +2,7 @@
 
 A high-performance caching server from Meta/Facebook, available as a Docker container. Use it as an alternative to Redis with superior performance and hybrid DRAM+SSD caching capabilities.
 
-**Version:** 1.2.2
+**Version:** 1.3.0
 
 **Architectures:** `linux/amd64` (x86_64), `linux/arm64` (Apple Silicon, AWS Graviton)
 
@@ -11,13 +11,13 @@ A high-performance caching server from Meta/Facebook, available as a Docker cont
 ### Pull and Run
 
 ```bash
-docker pull ghcr.io/celikgo/cachelib-grpc-server:1.2.2
+docker pull ghcr.io/celikgo/cachelib-grpc-server:1.3.0
 
 # Run with 1 GB cache (default)
-docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.2.2
+docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.3.0
 
 # Run with custom cache size (2 GB)
-docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.2.2 \
+docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.3.0 \
   --address=0.0.0.0 --port=50051 --cache_size=2147483648
 ```
 
@@ -26,13 +26,19 @@ docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-serve
 ```yaml
 services:
   cachelib:
-    image: ghcr.io/celikgo/cachelib-grpc-server:1.2.2
+    image: ghcr.io/celikgo/cachelib-grpc-server:1.3.0
     ports:
       - "50051:50051"
+      - "9090:9090"    # Prometheus metrics
     command:
       - "--address=0.0.0.0"
       - "--port=50051"
       - "--cache_size=1073741824"  # 1 GB
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=:50051"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     restart: unless-stopped
 ```
 
@@ -46,6 +52,7 @@ services:
 | `--enable_nvm` | `false` | Enable SSD cache |
 | `--nvm_path` | `/data/nvm/cache` | SSD cache file path |
 | `--nvm_size` | `10737418240` | SSD cache size (10 GB) |
+| `--metrics_port` | `9090` | Prometheus metrics HTTP port (0 = disabled) |
 
 ### Enable Hybrid DRAM+SSD Cache
 
@@ -54,9 +61,10 @@ For larger datasets, enable NVM (SSD) caching:
 ```yaml
 services:
   cachelib:
-    image: ghcr.io/celikgo/cachelib-grpc-server:1.2.2
+    image: ghcr.io/celikgo/cachelib-grpc-server:1.3.0
     ports:
       - "50051:50051"
+      - "9090:9090"
     command:
       - "--address=0.0.0.0"
       - "--port=50051"
@@ -88,6 +96,13 @@ volumes:
 |-----------|-------------|------------------|
 | `MultiGet` | Get multiple keys | `MGET` |
 | `MultiSet` | Set multiple keys | `MSET` |
+| `MultiDelete` | Delete multiple keys | `DEL k1 k2 ...` |
+
+### Streaming
+
+| Operation | Description | Redis Equivalent |
+|-----------|-------------|------------------|
+| `Pipeline` | Bidirectional streaming | Pipeline mode |
 
 ### Atomic Operations
 
@@ -133,6 +148,7 @@ service CacheService {
   // Batch Operations
   rpc MultiGet(MultiGetRequest) returns (MultiGetResponse);
   rpc MultiSet(MultiSetRequest) returns (MultiSetResponse);
+  rpc MultiDelete(MultiDeleteRequest) returns (MultiDeleteResponse);
 
   // Atomic Operations
   rpc SetNX(SetNXRequest) returns (SetNXResponse);
@@ -143,6 +159,9 @@ service CacheService {
   // TTL Operations
   rpc GetTTL(GetTTLRequest) returns (GetTTLResponse);
   rpc Touch(TouchRequest) returns (TouchResponse);
+
+  // Streaming
+  rpc Pipeline(stream PipelineRequest) returns (stream PipelineResponse);
 
   // Administration
   rpc Ping(PingRequest) returns (PingResponse);
@@ -186,6 +205,14 @@ message MultiSetResponse {
   repeated string failed_keys = 5;
 }
 
+message MultiDeleteRequest { repeated string keys = 1; }
+message MultiDeleteResponse {
+  bool success = 1;
+  int32 deleted_count = 2;
+  int32 not_found_count = 3;
+  string message = 4;
+}
+
 // Atomic Operations
 message SetNXRequest { string key = 1; bytes value = 2; int64 ttl_seconds = 3; }
 message SetNXResponse { bool was_set = 1; bytes existing_value = 2; string message = 3; }
@@ -200,7 +227,8 @@ message CompareAndSwapRequest {
   string key = 1;
   bytes expected_value = 2;
   bytes new_value = 3;
-  int64 ttl_seconds = 4;
+  uint32 ttl_seconds = 4;  // 0 = no expiration
+  bool keep_ttl = 5;       // preserve existing TTL
 }
 message CompareAndSwapResponse { bool success = 1; bytes actual_value = 2; string message = 3; }
 
@@ -245,6 +273,27 @@ message FlushResponse { bool success = 1; int64 items_removed = 2; string messag
 
 message ScanRequest { string pattern = 1; string cursor = 2; int32 count = 3; }
 message ScanResponse { repeated string keys = 1; string next_cursor = 2; bool has_more = 3; }
+
+// Pipeline streaming
+message PipelineRequest {
+  uint64 sequence_id = 1;
+  oneof operation {
+    GetRequest get = 2;
+    SetRequest set = 3;
+    DeleteRequest delete = 4;
+    ExistsRequest exists = 5;
+  }
+}
+message PipelineResponse {
+  uint64 sequence_id = 1;
+  oneof result {
+    GetResponse get = 2;
+    SetResponse set = 3;
+    DeleteResponse delete = 4;
+    ExistsResponse exists = 5;
+  }
+  string error = 6;
+}
 ```
 
 ## Client Examples
@@ -504,6 +553,9 @@ def get_session(session_id):
 | INCR/DECR | ✅ | ✅ |
 | TTL/EXPIRE | ✅ | ✅ |
 | CAS | Via Lua | ✅ Native |
+| Pipeline | ✅ | ✅ Streaming |
+| Metrics | Redis INFO | Prometheus |
+| Reflection | N/A | ✅ gRPC |
 | Clustering | Built-in | Single node |
 
 ## Building the Docker Image
@@ -520,7 +572,7 @@ docker buildx inspect --bootstrap
 # Build and push for both architectures
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/celikgo/cachelib-grpc-server:1.2.2 \
+  -t ghcr.io/celikgo/cachelib-grpc-server:1.3.0 \
   -t ghcr.io/celikgo/cachelib-grpc-server:latest \
   -f standalone_server/Dockerfile \
   --push \
@@ -532,8 +584,8 @@ docker buildx build \
 ### Native Build (single platform)
 
 ```bash
-docker build -t ghcr.io/celikgo/cachelib-grpc-server:1.2.2 -f standalone_server/Dockerfile .
-docker push ghcr.io/celikgo/cachelib-grpc-server:1.2.2
+docker build -t ghcr.io/celikgo/cachelib-grpc-server:1.3.0 -f standalone_server/Dockerfile .
+docker push ghcr.io/celikgo/cachelib-grpc-server:1.3.0
 ```
 
 ### CI/CD (GitHub Actions)
@@ -541,8 +593,8 @@ docker push ghcr.io/celikgo/cachelib-grpc-server:1.2.2
 The repository includes a GitHub Actions workflow (`.github/workflows/docker-publish.yml`) that automatically builds and pushes multi-platform images when a version tag is pushed:
 
 ```bash
-git tag v1.2.2
-git push origin v1.2.2
+git tag v1.3.0
+git push origin v1.3.0
 ```
 
 This triggers a build for both `linux/amd64` and `linux/arm64`, pushing to GHCR with the version tag and `latest`.
@@ -550,6 +602,14 @@ This triggers a build for both `linux/amd64` and `linux/arm64`, pushing to GHCR 
 You can also trigger a build manually via the GitHub Actions "Run workflow" button.
 
 ## Changelog
+
+### v1.3.0
+- gRPC server reflection (service discovery without proto files)
+- MultiDelete RPC for batch key deletion
+- Pipeline bidirectional streaming for mixed operations
+- Prometheus metrics endpoint (port 9090)
+- `grpc_health_probe` bundled in Docker image
+- CAS TTL convention fix with `keep_ttl` support
 
 ### v1.2.2
 - Multi-architecture support (amd64 + arm64)
@@ -592,8 +652,8 @@ nc -zv localhost 50051
 If you see `exec format error` or the container crash-loops, you're running an image built for a different architecture. Pull the correct multi-arch image:
 
 ```bash
-docker pull --platform linux/amd64 ghcr.io/celikgo/cachelib-grpc-server:1.2.2  # for x86_64 servers
-docker pull --platform linux/arm64 ghcr.io/celikgo/cachelib-grpc-server:1.2.2  # for ARM servers
+docker pull --platform linux/amd64 ghcr.io/celikgo/cachelib-grpc-server:1.3.0  # for x86_64 servers
+docker pull --platform linux/arm64 ghcr.io/celikgo/cachelib-grpc-server:1.3.0  # for ARM servers
 ```
 
 ## Links

@@ -73,6 +73,12 @@ class CacheServiceImpl final : public cachelib::grpc::CacheService::Service {
       const ::cachelib::grpc::MultiSetRequest* request,
       ::cachelib::grpc::MultiSetResponse* response) override;
 
+  // MultiDelete removes multiple keys in a single call
+  ::grpc::Status MultiDelete(
+      ::grpc::ServerContext* context,
+      const ::cachelib::grpc::MultiDeleteRequest* request,
+      ::cachelib::grpc::MultiDeleteResponse* response) override;
+
   // ---------------------------------------------------------------------------
   // Atomic Operations
   // ---------------------------------------------------------------------------
@@ -126,6 +132,17 @@ class CacheServiceImpl final : public cachelib::grpc::CacheService::Service {
       ::grpc::ServerContext* context,
       const ::cachelib::grpc::ScanRequest* request,
       ::cachelib::grpc::ScanResponse* response) override;
+
+  // ---------------------------------------------------------------------------
+  // Streaming Operations
+  // ---------------------------------------------------------------------------
+
+  // Pipeline enables bidirectional streaming for batching operations
+  ::grpc::Status Pipeline(
+      ::grpc::ServerContext* context,
+      ::grpc::ServerReaderWriter<
+          ::cachelib::grpc::PipelineResponse,
+          ::cachelib::grpc::PipelineRequest>* stream) override;
 
   // ---------------------------------------------------------------------------
   // Administration

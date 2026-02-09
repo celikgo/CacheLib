@@ -220,6 +220,36 @@ CacheServiceImpl::CacheServiceImpl(std::shared_ptr<CacheManager> cacheManager)
   return ::grpc::Status::OK;
 }
 
+::grpc::Status CacheServiceImpl::MultiDelete(
+    ::grpc::ServerContext* /*context*/,
+    const ::cachelib::grpc::MultiDeleteRequest* request,
+    ::cachelib::grpc::MultiDeleteResponse* response) {
+  if (!cacheManager_->isReady()) {
+    response->set_success(false);
+    response->set_message("Cache not initialized");
+    return ::grpc::Status(
+        ::grpc::StatusCode::UNAVAILABLE, "Cache not initialized");
+  }
+
+  std::vector<std::string> keys;
+  keys.reserve(request->keys_size());
+  for (const auto& key : request->keys()) {
+    keys.push_back(key);
+  }
+
+  int32_t deletedCount = cacheManager_->multiDelete(keys);
+  int32_t notFoundCount = static_cast<int32_t>(keys.size()) - deletedCount;
+
+  response->set_success(true);
+  response->set_deleted_count(deletedCount);
+  response->set_not_found_count(notFoundCount);
+  response->set_message(
+      "Deleted " + std::to_string(deletedCount) + " keys, " +
+      std::to_string(notFoundCount) + " not found");
+
+  return ::grpc::Status::OK;
+}
+
 // =============================================================================
 // Atomic Operations
 // =============================================================================
@@ -356,7 +386,8 @@ CacheServiceImpl::CacheServiceImpl(std::shared_ptr<CacheManager> cacheManager)
       request->key(),
       request->expected_value(),
       request->new_value(),
-      static_cast<int32_t>(request->ttl_seconds()));
+      static_cast<uint32_t>(request->ttl_seconds()),
+      request->keep_ttl());
 
   response->set_success(result.success);
   response->set_actual_value(result.actualValue);
@@ -427,6 +458,90 @@ CacheServiceImpl::CacheServiceImpl(std::shared_ptr<CacheManager> cacheManager)
 
   response->set_success(result.success);
   response->set_message(result.message);
+
+  return ::grpc::Status::OK;
+}
+
+// =============================================================================
+// Streaming Operations
+// =============================================================================
+
+::grpc::Status CacheServiceImpl::Pipeline(
+    ::grpc::ServerContext* /*context*/,
+    ::grpc::ServerReaderWriter<
+        ::cachelib::grpc::PipelineResponse,
+        ::cachelib::grpc::PipelineRequest>* stream) {
+  if (!cacheManager_->isReady()) {
+    return ::grpc::Status(
+        ::grpc::StatusCode::UNAVAILABLE, "Cache not initialized");
+  }
+
+  ::cachelib::grpc::PipelineRequest request;
+  while (stream->Read(&request)) {
+    ::cachelib::grpc::PipelineResponse response;
+    response.set_sequence_id(request.sequence_id());
+
+    switch (request.operation_case()) {
+      case ::cachelib::grpc::PipelineRequest::kGet: {
+        const auto& getReq = request.get();
+        if (getReq.key().empty()) {
+          response.set_error("Key cannot be empty");
+          break;
+        }
+        auto result = cacheManager_->get(getReq.key());
+        auto* getResp = response.mutable_get();
+        getResp->set_found(result.found);
+        if (result.found) {
+          getResp->set_value(result.value);
+          getResp->set_ttl_remaining(result.ttlRemaining);
+        }
+        break;
+      }
+      case ::cachelib::grpc::PipelineRequest::kSet: {
+        const auto& setReq = request.set();
+        if (setReq.key().empty()) {
+          response.set_error("Key cannot be empty");
+          break;
+        }
+        uint32_t ttl = setReq.ttl_seconds() > 0
+            ? static_cast<uint32_t>(setReq.ttl_seconds()) : 0;
+        bool success = cacheManager_->set(setReq.key(), setReq.value(), ttl);
+        auto* setResp = response.mutable_set();
+        setResp->set_success(success);
+        setResp->set_message(success ? "OK" : "Failed to set value");
+        break;
+      }
+      case ::cachelib::grpc::PipelineRequest::kDelete: {
+        const auto& delReq = request.delete_();
+        if (delReq.key().empty()) {
+          response.set_error("Key cannot be empty");
+          break;
+        }
+        bool existed = cacheManager_->remove(delReq.key());
+        auto* delResp = response.mutable_delete_();
+        delResp->set_success(true);
+        delResp->set_key_existed(existed);
+        delResp->set_message(existed ? "Key deleted" : "Key not found");
+        break;
+      }
+      case ::cachelib::grpc::PipelineRequest::kExists: {
+        const auto& existsReq = request.exists();
+        if (existsReq.key().empty()) {
+          response.set_error("Key cannot be empty");
+          break;
+        }
+        bool found = cacheManager_->exists(existsReq.key());
+        auto* existsResp = response.mutable_exists();
+        existsResp->set_exists(found);
+        break;
+      }
+      default:
+        response.set_error("Unknown operation");
+        break;
+    }
+
+    stream->Write(response);
+  }
 
   return ::grpc::Status::OK;
 }

@@ -57,6 +57,10 @@ service CacheService {
   // More efficient than multiple Set calls for bulk writes.
   rpc MultiSet(MultiSetRequest) returns (MultiSetResponse) {}
 
+  // MultiDelete removes multiple keys in a single call.
+  // More efficient than multiple Delete calls for bulk deletes.
+  rpc MultiDelete(MultiDeleteRequest) returns (MultiDeleteResponse) {}
+
   // ---------------------------------------------------------------------------
   // Atomic Operations
   // ---------------------------------------------------------------------------
@@ -96,6 +100,14 @@ service CacheService {
   // Scan iterates over keys matching a pattern with pagination.
   // Note: This operation may be slow on large caches.
   rpc Scan(ScanRequest) returns (ScanResponse) {}
+
+  // ---------------------------------------------------------------------------
+  // Streaming Operations
+  // ---------------------------------------------------------------------------
+
+  // Pipeline enables bidirectional streaming for batching multiple operations.
+  // Clients send a stream of requests and receive responses in order.
+  rpc Pipeline(stream PipelineRequest) returns (stream PipelineResponse) {}
 
   // ---------------------------------------------------------------------------
   // Administration
@@ -232,6 +244,26 @@ message MultiSetResponse {
   repeated string failed_keys = 5;
 }
 
+// MultiDeleteRequest removes multiple keys at once.
+//
+// Example: MultiDelete(keys=["user:1", "user:2", "user:3"])
+message MultiDeleteRequest {
+  // List of keys to delete
+  repeated string keys = 1;
+}
+
+// MultiDeleteResponse indicates results of the batch delete operation.
+message MultiDeleteResponse {
+  // True if operation completed without internal errors
+  bool success = 1;
+  // Number of keys that were found and deleted
+  int32 deleted_count = 2;
+  // Number of keys that were not found
+  int32 not_found_count = 3;
+  // Human-readable status message
+  string message = 4;
+}
+
 // =============================================================================
 // Atomic Operation Messages
 // =============================================================================
@@ -313,8 +345,10 @@ message CompareAndSwapRequest {
   bytes expected_value = 2;
   // New value to set if current matches expected
   bytes new_value = 3;
-  // TTL in seconds (0 = keep existing TTL, -1 = no expiration)
-  int64 ttl_seconds = 4;
+  // TTL in seconds (0 = no expiration, same as Set)
+  uint32 ttl_seconds = 4;
+  // When true, preserve existing TTL (ignores ttl_seconds)
+  bool keep_ttl = 5;
 }
 
 // CompareAndSwapResponse indicates if the swap succeeded.
@@ -498,4 +532,36 @@ message FlushResponse {
   int64 items_removed = 2;
   // Human-readable message
   string message = 3;
+}
+
+// =============================================================================
+// Pipeline Streaming Messages
+// =============================================================================
+
+// PipelineRequest wraps a single cache operation for streaming.
+message PipelineRequest {
+  // Client-assigned sequence ID for correlating responses
+  uint64 sequence_id = 1;
+  // The operation to perform
+  oneof operation {
+    GetRequest get = 2;
+    SetRequest set = 3;
+    DeleteRequest delete = 4;
+    ExistsRequest exists = 5;
+  }
+}
+
+// PipelineResponse wraps the result of a single pipeline operation.
+message PipelineResponse {
+  // Echoed sequence ID from the request
+  uint64 sequence_id = 1;
+  // The result of the operation
+  oneof result {
+    GetResponse get = 2;
+    SetResponse set = 3;
+    DeleteResponse delete = 4;
+    ExistsResponse exists = 5;
+  }
+  // Non-empty if the operation failed
+  string error = 6;
 }
