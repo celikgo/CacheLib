@@ -2,7 +2,7 @@
 
 A high-performance caching server from Meta/Facebook, available as a Docker container. Use it as an alternative to Redis with superior performance and hybrid DRAM+SSD caching capabilities.
 
-**Version:** 1.3.0
+**Version:** 1.3.1
 
 **Architectures:** `linux/amd64` (x86_64), `linux/arm64` (Apple Silicon, AWS Graviton)
 
@@ -11,13 +11,13 @@ A high-performance caching server from Meta/Facebook, available as a Docker cont
 ### Pull and Run
 
 ```bash
-docker pull ghcr.io/celikgo/cachelib-grpc-server:1.3.0
+docker pull ghcr.io/celikgo/cachelib-grpc-server:1.3.1
 
 # Run with 1 GB cache (default)
-docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.3.0
+docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.3.1
 
 # Run with custom cache size (2 GB)
-docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.3.0 \
+docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.3.1 \
   --address=0.0.0.0 --port=50051 --cache_size=2147483648
 ```
 
@@ -26,7 +26,7 @@ docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-serve
 ```yaml
 services:
   cachelib:
-    image: ghcr.io/celikgo/cachelib-grpc-server:1.3.0
+    image: ghcr.io/celikgo/cachelib-grpc-server:1.3.1
     ports:
       - "50051:50051"
       - "9090:9090"    # Prometheus metrics
@@ -61,7 +61,7 @@ For larger datasets, enable NVM (SSD) caching:
 ```yaml
 services:
   cachelib:
-    image: ghcr.io/celikgo/cachelib-grpc-server:1.3.0
+    image: ghcr.io/celikgo/cachelib-grpc-server:1.3.1
     ports:
       - "50051:50051"
       - "9090:9090"
@@ -572,7 +572,7 @@ docker buildx inspect --bootstrap
 # Build and push for both architectures
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/celikgo/cachelib-grpc-server:1.3.0 \
+  -t ghcr.io/celikgo/cachelib-grpc-server:1.3.1 \
   -t ghcr.io/celikgo/cachelib-grpc-server:latest \
   -f standalone_server/Dockerfile \
   --push \
@@ -584,8 +584,8 @@ docker buildx build \
 ### Native Build (single platform)
 
 ```bash
-docker build -t ghcr.io/celikgo/cachelib-grpc-server:1.3.0 -f standalone_server/Dockerfile .
-docker push ghcr.io/celikgo/cachelib-grpc-server:1.3.0
+docker build -t ghcr.io/celikgo/cachelib-grpc-server:1.3.1 -f standalone_server/Dockerfile .
+docker push ghcr.io/celikgo/cachelib-grpc-server:1.3.1
 ```
 
 ### CI/CD (GitHub Actions)
@@ -593,8 +593,8 @@ docker push ghcr.io/celikgo/cachelib-grpc-server:1.3.0
 The repository includes a GitHub Actions workflow (`.github/workflows/docker-publish.yml`) that automatically builds and pushes multi-platform images when a version tag is pushed:
 
 ```bash
-git tag v1.3.0
-git push origin v1.3.0
+git tag v1.3.1
+git push origin v1.3.1
 ```
 
 This triggers a build for both `linux/amd64` and `linux/arm64`, pushing to GHCR with the version tag and `latest`.
@@ -602,6 +602,13 @@ This triggers a build for both `linux/amd64` and `linux/arm64`, pushing to GHCR 
 You can also trigger a build manually via the GitHub Actions "Run workflow" button.
 
 ## Changelog
+
+### v1.3.1
+- **Fix:** Flush RPC now iterates and removes all items (was a stub returning 0)
+- **Fix:** Scan RPC now implements cursor-based pagination with pattern matching (was a stub returning empty)
+- `--version` CLI flag for instant version check
+- Prometheus `cachelib_expired_total` counter and `cachelib_info{version}` gauge
+- `expired_count` now populated in Stats responses
 
 ### v1.3.0
 - gRPC server reflection (service discovery without proto files)
@@ -652,8 +659,8 @@ nc -zv localhost 50051
 If you see `exec format error` or the container crash-loops, you're running an image built for a different architecture. Pull the correct multi-arch image:
 
 ```bash
-docker pull --platform linux/amd64 ghcr.io/celikgo/cachelib-grpc-server:1.3.0  # for x86_64 servers
-docker pull --platform linux/arm64 ghcr.io/celikgo/cachelib-grpc-server:1.3.0  # for ARM servers
+docker pull --platform linux/amd64 ghcr.io/celikgo/cachelib-grpc-server:1.3.1  # for x86_64 servers
+docker pull --platform linux/arm64 ghcr.io/celikgo/cachelib-grpc-server:1.3.1  # for ARM servers
 ```
 
 ## Links
