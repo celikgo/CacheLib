@@ -1,5 +1,26 @@
 # CacheLib gRPC Server - Release Notes
 
+## v1.3.1 (2026-02-10)
+
+### Bug Fixes
+
+- **Fix Flush RPC (P0)**: Flush was a stub that logged a warning and returned 0. Now uses CacheLib's `AccessIterator` to iterate all items and remove them by key, returning the actual removed count.
+- **Fix Scan RPC (P0)**: Scan was a stub that returned empty results. Now implements cursor-based pagination using CacheLib's `AccessIterator` with glob pattern matching. Cursor = last returned key; empty cursor = start from beginning.
+
+### Improvements
+
+- **`--version` CLI flag**: `cachelib-grpc-server --version` prints version and exits immediately (handled before `folly::Init` for instant response)
+- **Prometheus `cachelib_expired_total` counter**: Tracks items found expired during get operations (from `numCacheGetExpiries`)
+- **Prometheus `cachelib_info` gauge**: Exposes server version as a label (`cachelib_info{version="1.3.1"} 1`) for Grafana dashboards
+- **Populate `expiredCount` in Stats RPC**: The `expired_count` field in Stats responses is now populated from CacheLib's `numCacheGetExpiries` global stat (was always 0)
+
+### Docker
+
+- Image: `cachelib-grpc-server:1.3.1`
+- Test: `docker run --rm cachelib-grpc-server:1.3.1 --version` outputs `cachelib-grpc-server 1.3.1`
+
+---
+
 ## v1.3.0 (2026-02-09)
 
 ### New Features
