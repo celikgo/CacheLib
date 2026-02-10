@@ -106,6 +106,14 @@ void printConfiguration(const cachelib::grpc_server::CacheConfig& config) {
 }
 
 int main(int argc, char** argv) {
+  // Check --version before folly::Init (which may modify args)
+  for (int i = 1; i < argc; i++) {
+    if (std::string(argv[i]) == "--version" || std::string(argv[i]) == "-version") {
+      std::cout << "cachelib-grpc-server " << cachelib::grpc_server::kServerVersion << std::endl;
+      return 0;
+    }
+  }
+
   // Initialize folly and gflags
   folly::Init init(&argc, &argv);
 

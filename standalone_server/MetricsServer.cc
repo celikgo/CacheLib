@@ -186,6 +186,10 @@ std::string MetricsServer::generateMetrics() {
       << "# TYPE cachelib_evictions_total counter\n"
       << "cachelib_evictions_total " << stats.evictionCount << "\n\n";
 
+  out << "# HELP cachelib_expired_total Total number of expired items found during gets.\n"
+      << "# TYPE cachelib_expired_total counter\n"
+      << "cachelib_expired_total " << stats.expiredCount << "\n\n";
+
   // Hit rate
   out << "# HELP cachelib_hit_rate Cache hit rate (0.0 - 1.0).\n"
       << "# TYPE cachelib_hit_rate gauge\n"
@@ -195,6 +199,11 @@ std::string MetricsServer::generateMetrics() {
   out << "# HELP cachelib_uptime_seconds Server uptime in seconds.\n"
       << "# TYPE cachelib_uptime_seconds gauge\n"
       << "cachelib_uptime_seconds " << stats.uptimeSeconds << "\n\n";
+
+  // Version info
+  out << "# HELP cachelib_info CacheLib gRPC server version info.\n"
+      << "# TYPE cachelib_info gauge\n"
+      << "cachelib_info{version=\"" << stats.version << "\"} 1\n\n";
 
   // NVM metrics (when enabled)
   if (stats.nvmEnabled) {

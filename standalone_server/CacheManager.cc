@@ -607,18 +607,40 @@ ScanResult CacheManager::scan(const std::string& pattern,
     count = 10000;
   }
 
-  // Note: CacheLib doesn't have a native scan/iterate API that's exposed
-  // in a simple way. This is a limitation. For now, we'll return an
-  // empty result and log a warning.
-  //
-  // A full implementation would require iterating over all items,
-  // which could be expensive for large caches.
+  // Cursor is the last key seen (empty = start from beginning)
+  bool pastCursor = cursor.empty();
+  int32_t matched = 0;
 
-  XLOG(WARN) << "Scan operation is not fully implemented - "
-             << "CacheLib doesn't expose a simple iteration API";
+  auto config = facebook::cachelib::util::Throttler::Config::makeNoThrottleConfig();
 
-  result.hasMore = false;
-  result.nextCursor = "";
+  for (auto it = cache_->begin(config); it != cache_->end(); ++it) {
+    auto key = it->getKey();
+    std::string keyStr(key.data(), key.size());
+
+    // Skip until we pass the cursor position
+    if (!pastCursor) {
+      if (keyStr == cursor) {
+        pastCursor = true;
+      }
+      continue;
+    }
+
+    // Match against pattern
+    if (matchesPattern(keyStr, pattern)) {
+      result.keys.push_back(keyStr);
+      matched++;
+
+      if (matched >= count) {
+        // Check if there are more items
+        ++it;
+        if (it != cache_->end()) {
+          result.hasMore = true;
+          result.nextCursor = keyStr;  // Last returned key as cursor
+        }
+        break;
+      }
+    }
+  }
 
   return result;
 }
@@ -651,6 +673,7 @@ CacheStats CacheManager::getStats() const {
 
     stats.itemCount = static_cast<int64_t>(globalStats.numItems);
     stats.evictionCount = static_cast<int64_t>(globalStats.numEvictions);
+    stats.expiredCount = static_cast<int64_t>(globalStats.numCacheGetExpiries);
 
     // Our tracked counters - use sequential consistency for guaranteed visibility
     stats.getCount = getCount_.load(std::memory_order_seq_cst);
@@ -705,12 +728,20 @@ int64_t CacheManager::flush() {
     return 0;
   }
 
-  // CacheLib doesn't have a direct flush API
-  // We would need to iterate and remove all items, which is expensive
-  // For now, the best approach is to recreate the cache
+  int64_t removedCount = 0;
+  // Use throttled iterator with no throttling for fast flush
+  auto config = facebook::cachelib::util::Throttler::Config::makeNoThrottleConfig();
 
-  XLOG(WARN) << "Flush operation requires cache restart - not implemented";
-  return 0;
+  for (auto it = cache_->begin(config); it != cache_->end(); ++it) {
+    auto key = it->getKey();
+    auto removeResult = cache_->remove(key);
+    if (removeResult == Cache::RemoveRes::kSuccess) {
+      removedCount++;
+    }
+  }
+
+  XLOG(INFO) << "Flush completed: removed " << removedCount << " items";
+  return removedCount;
 }
 
 }  // namespace grpc_server
