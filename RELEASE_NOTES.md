@@ -2,30 +2,173 @@
 
 ## v1.4.0 (2026-03-24)
 
-### New Features
+### Upgrade
 
-- **`size_bytes` in SetResponse**: Set operations now return the stored value size in bytes, enabling client-side monitoring without computing sizes locally
-- **Enriched Scan with per-key metadata**: Scan RPC now supports `include_details=true` to return `KeyInfo` (key, TTL remaining, size in bytes) per matched key — useful for cache debugging and visibility
-- **`KeyInfo` proto message**: New message type with `key`, `ttl_remaining`, and `size_bytes` fields for detailed key inspection
+```bash
+docker pull celikgo/cachelib-grpc-server:1.4.0
+```
 
-### Proto Changes
+All proto changes are **backward-compatible** — existing clients work without modifications.
+Regenerate your gRPC stubs from the updated `cache.proto` to access new fields.
 
-- Added `int64 size_bytes = 3` to `SetResponse`
-- Added `bool include_details = 4` to `ScanRequest`
-- Added `KeyInfo` message (key, ttl_remaining, size_bytes)
-- Added `repeated KeyInfo key_details = 4` to `ScanResponse`
-- All changes are backward-compatible (new fields default to zero/empty)
+---
 
-### Build Fixes
+### 1. `size_bytes` in SetResponse
 
-- Fixed aarch64 Docker linking: added `-Wl,--copy-dt-needed-entries` to resolve libunwind/liblzma transitive dependency issue
-- Added Docker `tester` stage for running `cache_manager_test` in CI
-- Fixed test include path and namespace resolution for Docker builds
+Set operations now return the stored value size in bytes. No client changes needed —
+the field is automatically populated on success.
+
+**Proto diff:**
+```protobuf
+message SetResponse {
+  bool success = 1;
+  string message = 2;
+  int64 size_bytes = 3;  // NEW — actual stored value size
+}
+```
+
+**Usage (grpcurl):**
+```bash
+$ grpcurl -plaintext -d '{"key":"user:123","value":"eyJuYW1lIjoiYWxpY2UifQ==","ttl_seconds":300}' \
+    localhost:50051 cachelib.grpc.CacheService/Set
+
+{
+  "success": true,
+  "message": "OK",
+  "size_bytes": "17"
+}
+```
+
+**Usage (Java):**
+```java
+SetResponse resp = stub.set(SetRequest.newBuilder()
+    .setKey("user:123")
+    .setValue(ByteString.copyFromUtf8(json))
+    .setTtlSeconds(300)
+    .build());
+long storedBytes = resp.getSizeBytes();  // 17
+```
+
+**Use case:** Track stored sizes for monitoring dashboards without computing
+`value.length()` client-side. Useful when compression or encoding makes the stored
+size different from what the client sent.
+
+---
+
+### 2. Enriched Scan with per-key metadata (`include_details`)
+
+Scan now supports `include_details=true` to return TTL and size for each matched key.
+Without this flag, behavior is unchanged (only key names returned).
+
+**Proto diff:**
+```protobuf
+message ScanRequest {
+  string pattern = 1;
+  string cursor = 2;
+  int32 count = 3;
+  bool include_details = 4;  // NEW — opt-in for per-key metadata
+}
+
+// NEW message
+message KeyInfo {
+  string key = 1;
+  int64 ttl_remaining = 2;  // seconds, -1 = no expiry
+  int64 size_bytes = 3;
+}
+
+message ScanResponse {
+  repeated string keys = 1;
+  string next_cursor = 2;
+  bool has_more = 3;
+  repeated KeyInfo key_details = 4;  // NEW — populated when include_details=true
+}
+```
+
+**Usage (grpcurl):**
+```bash
+# Without details (backward-compatible, same as before)
+$ grpcurl -plaintext -d '{"pattern":"market:*"}' \
+    localhost:50051 cachelib.grpc.CacheService/Scan
+
+{
+  "keys": ["market:AAPL", "market:GOOG"]
+}
+
+# With details — returns TTL and size per key
+$ grpcurl -plaintext -d '{"pattern":"market:*","include_details":true}' \
+    localhost:50051 cachelib.grpc.CacheService/Scan
+
+{
+  "keys": ["market:AAPL", "market:GOOG"],
+  "key_details": [
+    { "key": "market:AAPL", "ttl_remaining": "542", "size_bytes": "3" },
+    { "key": "market:GOOG", "ttl_remaining": "542", "size_bytes": "3" }
+  ]
+}
+```
+
+**Usage (Python):**
+```python
+resp = stub.Scan(ScanRequest(pattern="market:*", include_details=True))
+for info in resp.key_details:
+    print(f"{info.key}: TTL={info.ttl_remaining}s, size={info.size_bytes}B")
+    # market:AAPL: TTL=542s, size=3B
+    # market:GOOG: TTL=542s, size=3B
+```
+
+**TTL values:**
+| Value | Meaning |
+|-------|---------|
+| `-1` | Key has no expiration |
+| `0` | Key is expired (should not appear in scan) |
+| `N` | N seconds remaining until expiry |
+
+**Use case:** Debugging cache miss rate alerts. When the Discovery Server Team hit
+a 76% miss rate, they had no visibility into which keys existed or their TTLs.
+`include_details=true` lets you inspect the cache state without fetching values.
+
+---
+
+### 3. Reminder: Features you already have
+
+Based on Discovery Server Team feedback, many requested features already exist:
+
+| You asked for | We already have | RPC name |
+|---|---|---|
+| MGet (batch get) | `MultiGet` | Returns value + `ttl_remaining` per key |
+| MSet (batch set) | `MultiSet` | Returns `succeeded_count` / `failed_count` / `failed_keys` |
+| Keys/Scan | `Scan` | Pattern matching with cursor pagination (now with `include_details`) |
+| Touch/Expire | `Touch` | Updates TTL without re-fetching the value |
+| Stats | `Stats` | Hit/miss/eviction/memory/NVM/uptime counters |
+
+Full RPC list: `grpcurl -plaintext localhost:50051 list cachelib.grpc.CacheService`
+
+---
+
+### Build & Infrastructure
+
+- Fixed aarch64 Docker linking (`-Wl,--copy-dt-needed-entries`) for libunwind/liblzma
+- Added Docker `tester` stage (`docker build --target tester`) for CI test execution
+- Fixed test namespace resolution and include paths for Docker builds
 
 ### Docker
 
-- Image: `cachelib-grpc-server:1.4.0`
-- Test: `docker run --rm cachelib-grpc-server:1.4.0 --version` outputs `cachelib-grpc-server 1.4.0`
+```bash
+# Pull
+docker pull celikgo/cachelib-grpc-server:1.4.0
+
+# Run
+docker run -d -p 50051:50051 -p 9090:9090 \
+  celikgo/cachelib-grpc-server:1.4.0 \
+  --cache_size=2147483648
+
+# Verify
+docker run --rm celikgo/cachelib-grpc-server:1.4.0 --version
+# cachelib-grpc-server 1.4.0
+
+# Prometheus metrics
+curl http://localhost:9090/metrics
+```
 
 ---
 
