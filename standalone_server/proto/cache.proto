@@ -164,6 +164,8 @@ message SetResponse {
   bool success = 1;
   // Human-readable status message
   string message = 2;
+  // Actual stored value size in bytes (useful for client-side monitoring)
+  int64 size_bytes = 3;
 }
 
 // DeleteRequest removes a key from the cache.
@@ -420,6 +422,18 @@ message ScanRequest {
   string cursor = 2;
   // Maximum number of keys to return per call (default: 100, max: 10000)
   int32 count = 3;
+  // If true, include per-key metadata (TTL, size) in key_details
+  bool include_details = 4;
+}
+
+// KeyInfo contains metadata about a single cached key.
+message KeyInfo {
+  // The cache key
+  string key = 1;
+  // Remaining TTL in seconds (-1 = no expiry, 0 = expired/not found)
+  int64 ttl_remaining = 2;
+  // Stored value size in bytes
+  int64 size_bytes = 3;
 }
 
 // ScanResponse contains matching keys and pagination cursor.
@@ -430,6 +444,8 @@ message ScanResponse {
   string next_cursor = 2;
   // True if there are more results
   bool has_more = 3;
+  // Per-key metadata (only populated if include_details=true in request)
+  repeated KeyInfo key_details = 4;
 }
 
 // =============================================================================

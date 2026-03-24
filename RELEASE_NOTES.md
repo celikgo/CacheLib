@@ -1,5 +1,34 @@
 # CacheLib gRPC Server - Release Notes
 
+## v1.4.0 (2026-03-24)
+
+### New Features
+
+- **`size_bytes` in SetResponse**: Set operations now return the stored value size in bytes, enabling client-side monitoring without computing sizes locally
+- **Enriched Scan with per-key metadata**: Scan RPC now supports `include_details=true` to return `KeyInfo` (key, TTL remaining, size in bytes) per matched key — useful for cache debugging and visibility
+- **`KeyInfo` proto message**: New message type with `key`, `ttl_remaining`, and `size_bytes` fields for detailed key inspection
+
+### Proto Changes
+
+- Added `int64 size_bytes = 3` to `SetResponse`
+- Added `bool include_details = 4` to `ScanRequest`
+- Added `KeyInfo` message (key, ttl_remaining, size_bytes)
+- Added `repeated KeyInfo key_details = 4` to `ScanResponse`
+- All changes are backward-compatible (new fields default to zero/empty)
+
+### Build Fixes
+
+- Fixed aarch64 Docker linking: added `-Wl,--copy-dt-needed-entries` to resolve libunwind/liblzma transitive dependency issue
+- Added Docker `tester` stage for running `cache_manager_test` in CI
+- Fixed test include path and namespace resolution for Docker builds
+
+### Docker
+
+- Image: `cachelib-grpc-server:1.4.0`
+- Test: `docker run --rm cachelib-grpc-server:1.4.0 --version` outputs `cachelib-grpc-server 1.4.0`
+
+---
+
 ## v1.3.1 (2026-02-10)
 
 ### Bug Fixes

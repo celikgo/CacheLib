@@ -168,12 +168,21 @@ RUN mkdir -p build && \
     echo "CMAKE_PREFIX_PATH=${CMAKE_PATHS}" && \
     cmake -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_PREFIX_PATH="${CMAKE_PATHS}" \
+          -DCMAKE_EXE_LINKER_FLAGS="-Wl,--copy-dt-needed-entries" \
           -DBUILD_TESTS=OFF \
           -G Ninja \
           .. && \
     ninja -j$(nproc)
 
-# Stage 2: Runtime image
+# Stage 2: Test stage (optional, use --target tester)
+FROM builder AS tester
+WORKDIR /build/CacheLib/standalone_server
+RUN cd build && \
+    cmake -DBUILD_TESTS=ON . && \
+    ninja -j$(nproc) cache_manager_test && \
+    ./cache_manager_test
+
+# Stage 3: Runtime image
 FROM ubuntu:24.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive

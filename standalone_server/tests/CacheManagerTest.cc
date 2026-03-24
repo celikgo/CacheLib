@@ -231,6 +231,43 @@ TEST_F(CacheManagerTest, SpecialCharactersInKey) {
   }
 }
 
+TEST_F(CacheManagerTest, ScanWithDetails) {
+  // Set some keys with known prefixes and TTLs
+  EXPECT_TRUE(cacheManager_->set("scan:a", "value-a", 300));
+  EXPECT_TRUE(cacheManager_->set("scan:b", "value-bb", 600));
+  EXPECT_TRUE(cacheManager_->set("scan:c", "value-ccc", 0));  // no expiry
+  EXPECT_TRUE(cacheManager_->set("other:x", "value-x", 60));
+
+  // Scan without details (backward compat)
+  auto result1 = cacheManager_->scan("scan:*", "", 100, false);
+  EXPECT_EQ(result1.keys.size(), 3);
+  EXPECT_TRUE(result1.keyDetails.empty());
+
+  // Scan with details
+  auto result2 = cacheManager_->scan("scan:*", "", 100, true);
+  EXPECT_EQ(result2.keys.size(), 3);
+  EXPECT_EQ(result2.keyDetails.size(), 3);
+
+  // Verify each key has correct metadata
+  for (const auto& info : result2.keyDetails) {
+    EXPECT_FALSE(info.key.empty());
+    EXPECT_GT(info.sizeBytes, 0);
+
+    if (info.key == "scan:a") {
+      EXPECT_EQ(info.sizeBytes, 7);  // "value-a"
+      EXPECT_GT(info.ttlRemaining, 250);
+      EXPECT_LE(info.ttlRemaining, 300);
+    } else if (info.key == "scan:b") {
+      EXPECT_EQ(info.sizeBytes, 8);  // "value-bb"
+      EXPECT_GT(info.ttlRemaining, 550);
+      EXPECT_LE(info.ttlRemaining, 600);
+    } else if (info.key == "scan:c") {
+      EXPECT_EQ(info.sizeBytes, 9);  // "value-ccc"
+      EXPECT_EQ(info.ttlRemaining, -1);  // no expiry
+    }
+  }
+}
+
 TEST_F(CacheManagerTest, IsReady) {
   EXPECT_TRUE(cacheManager_->isReady());
 
@@ -282,7 +319,7 @@ TEST_F(CacheManagerTtlTest, SetWithoutTtl) {
 
   auto result = cacheManager_->get(key);
   EXPECT_TRUE(result.found);
-  EXPECT_EQ(result.ttlRemaining, 0);  // No expiration
+  EXPECT_EQ(result.ttlRemaining, -1);  // No expiration (-1 = no expiry)
 }
 
 // Note: Testing actual expiration would require sleeping, which is not ideal

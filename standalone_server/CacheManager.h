@@ -30,7 +30,7 @@ namespace cachelib {
 namespace grpc_server {
 
 // Server version
-constexpr const char* kServerVersion = "1.3.1";
+constexpr const char* kServerVersion = "1.4.0";
 
 // Configuration for the cache manager
 struct CacheConfig {
@@ -106,9 +106,17 @@ struct TouchResult {
   std::string message;
 };
 
+// Per-key metadata returned by scan with details
+struct KeyInfo {
+  std::string key;
+  int64_t ttlRemaining = 0;  // -1 = no expiry, 0 = expired
+  int64_t sizeBytes = 0;
+};
+
 // Result of Scan operation
 struct ScanResult {
   std::vector<std::string> keys;
+  std::vector<KeyInfo> keyDetails;  // Populated when includeDetails=true
   std::string nextCursor;
   bool hasMore = false;
 };
@@ -231,8 +239,8 @@ class CacheManager {
   // Key Scanning
   // ---------------------------------------------------------------------------
 
-  // Scan keys matching a pattern
-  ScanResult scan(const std::string& pattern, const std::string& cursor, int32_t count);
+  // Scan keys matching a pattern (includeDetails adds TTL/size per key)
+  ScanResult scan(const std::string& pattern, const std::string& cursor, int32_t count, bool includeDetails = false);
 
   // ---------------------------------------------------------------------------
   // Administration

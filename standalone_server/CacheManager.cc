@@ -593,7 +593,8 @@ bool CacheManager::matchesPattern(const std::string& key,
 
 ScanResult CacheManager::scan(const std::string& pattern,
                                const std::string& cursor,
-                               int32_t count) {
+                               int32_t count,
+                               bool includeDetails) {
   ScanResult result;
 
   if (!cache_) {
@@ -628,6 +629,30 @@ ScanResult CacheManager::scan(const std::string& pattern,
     // Match against pattern
     if (matchesPattern(keyStr, pattern)) {
       result.keys.push_back(keyStr);
+
+      if (includeDetails) {
+        KeyInfo info;
+        info.key = keyStr;
+        info.sizeBytes = static_cast<int64_t>(it->getSize());
+
+        uint32_t expiryTime = it->getExpiryTime();
+        if (expiryTime == 0) {
+          info.ttlRemaining = -1;  // No expiration
+        } else {
+          uint32_t now = static_cast<uint32_t>(
+              std::chrono::duration_cast<std::chrono::seconds>(
+                  std::chrono::system_clock::now().time_since_epoch())
+                  .count());
+          if (expiryTime > now) {
+            info.ttlRemaining = static_cast<int64_t>(expiryTime - now);
+          } else {
+            info.ttlRemaining = 0;
+          }
+        }
+
+        result.keyDetails.push_back(std::move(info));
+      }
+
       matched++;
 
       if (matched >= count) {

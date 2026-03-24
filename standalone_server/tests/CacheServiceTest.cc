@@ -19,7 +19,7 @@
 
 #include "../CacheManager.h"
 #include "../CacheServiceImpl.h"
-#include "proto/cache.grpc.pb.h"
+#include "cache.grpc.pb.h"
 
 namespace cachelib {
 namespace grpc_server {
@@ -41,13 +41,13 @@ class CacheServiceTest : public ::testing::Test {
     service_ = std::make_unique<CacheServiceImpl>(cacheManager_);
 
     // Build and start in-process server
-    grpc::ServerBuilder builder;
+    ::grpc::ServerBuilder builder;
     builder.RegisterService(service_.get());
     server_ = builder.BuildAndStart();
     ASSERT_NE(server_, nullptr);
 
     // Create in-process channel
-    auto channel = server_->InProcessChannel(grpc::ChannelArguments());
+    auto channel = server_->InProcessChannel(::grpc::ChannelArguments());
     stub_ = cachelib::grpc::CacheService::NewStub(channel);
   }
 
@@ -62,12 +62,12 @@ class CacheServiceTest : public ::testing::Test {
 
   std::shared_ptr<CacheManager> cacheManager_;
   std::unique_ptr<CacheServiceImpl> service_;
-  std::unique_ptr<grpc::Server> server_;
+  std::unique_ptr<::grpc::Server> server_;
   std::unique_ptr<cachelib::grpc::CacheService::Stub> stub_;
 };
 
 TEST_F(CacheServiceTest, Ping) {
-  grpc::ClientContext context;
+  ::grpc::ClientContext context;
   cachelib::grpc::PingRequest request;
   cachelib::grpc::PingResponse response;
 
@@ -84,7 +84,7 @@ TEST_F(CacheServiceTest, SetAndGet) {
 
   // Set
   {
-    grpc::ClientContext context;
+    ::grpc::ClientContext context;
     cachelib::grpc::SetRequest request;
     cachelib::grpc::SetResponse response;
 
@@ -98,7 +98,7 @@ TEST_F(CacheServiceTest, SetAndGet) {
 
   // Get
   {
-    grpc::ClientContext context;
+    ::grpc::ClientContext context;
     cachelib::grpc::GetRequest request;
     cachelib::grpc::GetResponse response;
 
@@ -112,7 +112,7 @@ TEST_F(CacheServiceTest, SetAndGet) {
 }
 
 TEST_F(CacheServiceTest, GetNotFound) {
-  grpc::ClientContext context;
+  ::grpc::ClientContext context;
   cachelib::grpc::GetRequest request;
   cachelib::grpc::GetResponse response;
 
@@ -129,7 +129,7 @@ TEST_F(CacheServiceTest, SetWithTtl) {
 
   // Set with TTL
   {
-    grpc::ClientContext context;
+    ::grpc::ClientContext context;
     cachelib::grpc::SetRequest request;
     cachelib::grpc::SetResponse response;
 
@@ -144,7 +144,7 @@ TEST_F(CacheServiceTest, SetWithTtl) {
 
   // Get and check TTL
   {
-    grpc::ClientContext context;
+    ::grpc::ClientContext context;
     cachelib::grpc::GetRequest request;
     cachelib::grpc::GetResponse response;
 
@@ -164,7 +164,7 @@ TEST_F(CacheServiceTest, Delete) {
 
   // Set first
   {
-    grpc::ClientContext context;
+    ::grpc::ClientContext context;
     cachelib::grpc::SetRequest request;
     cachelib::grpc::SetResponse response;
 
@@ -176,7 +176,7 @@ TEST_F(CacheServiceTest, Delete) {
 
   // Delete
   {
-    grpc::ClientContext context;
+    ::grpc::ClientContext context;
     cachelib::grpc::DeleteRequest request;
     cachelib::grpc::DeleteResponse response;
 
@@ -190,7 +190,7 @@ TEST_F(CacheServiceTest, Delete) {
 
   // Verify deleted
   {
-    grpc::ClientContext context;
+    ::grpc::ClientContext context;
     cachelib::grpc::GetRequest request;
     cachelib::grpc::GetResponse response;
 
@@ -203,7 +203,7 @@ TEST_F(CacheServiceTest, Delete) {
 }
 
 TEST_F(CacheServiceTest, DeleteNonExistent) {
-  grpc::ClientContext context;
+  ::grpc::ClientContext context;
   cachelib::grpc::DeleteRequest request;
   cachelib::grpc::DeleteResponse response;
 
@@ -221,7 +221,7 @@ TEST_F(CacheServiceTest, Exists) {
 
   // Check non-existent
   {
-    grpc::ClientContext context;
+    ::grpc::ClientContext context;
     cachelib::grpc::ExistsRequest request;
     cachelib::grpc::ExistsResponse response;
 
@@ -234,7 +234,7 @@ TEST_F(CacheServiceTest, Exists) {
 
   // Set
   {
-    grpc::ClientContext context;
+    ::grpc::ClientContext context;
     cachelib::grpc::SetRequest request;
     cachelib::grpc::SetResponse response;
 
@@ -246,7 +246,7 @@ TEST_F(CacheServiceTest, Exists) {
 
   // Check exists
   {
-    grpc::ClientContext context;
+    ::grpc::ClientContext context;
     cachelib::grpc::ExistsRequest request;
     cachelib::grpc::ExistsResponse response;
 
@@ -261,7 +261,7 @@ TEST_F(CacheServiceTest, Exists) {
 TEST_F(CacheServiceTest, MultiGet) {
   // Set some keys
   for (int i = 0; i < 5; ++i) {
-    grpc::ClientContext context;
+    ::grpc::ClientContext context;
     cachelib::grpc::SetRequest request;
     cachelib::grpc::SetResponse response;
 
@@ -272,7 +272,7 @@ TEST_F(CacheServiceTest, MultiGet) {
   }
 
   // MultiGet
-  grpc::ClientContext context;
+  ::grpc::ClientContext context;
   cachelib::grpc::MultiGetRequest request;
   cachelib::grpc::MultiGetResponse response;
 
@@ -298,7 +298,7 @@ TEST_F(CacheServiceTest, MultiGet) {
 }
 
 TEST_F(CacheServiceTest, MultiSet) {
-  grpc::ClientContext context;
+  ::grpc::ClientContext context;
   cachelib::grpc::MultiSetRequest request;
   cachelib::grpc::MultiSetResponse response;
 
@@ -317,7 +317,7 @@ TEST_F(CacheServiceTest, MultiSet) {
 
   // Verify some values
   {
-    grpc::ClientContext ctx;
+    ::grpc::ClientContext ctx;
     cachelib::grpc::GetRequest req;
     cachelib::grpc::GetResponse resp;
 
@@ -332,7 +332,7 @@ TEST_F(CacheServiceTest, MultiSet) {
 TEST_F(CacheServiceTest, Stats) {
   // Perform some operations
   for (int i = 0; i < 10; ++i) {
-    grpc::ClientContext context;
+    ::grpc::ClientContext context;
     cachelib::grpc::SetRequest request;
     cachelib::grpc::SetResponse response;
 
@@ -343,7 +343,7 @@ TEST_F(CacheServiceTest, Stats) {
   }
 
   for (int i = 0; i < 5; ++i) {
-    grpc::ClientContext context;
+    ::grpc::ClientContext context;
     cachelib::grpc::GetRequest request;
     cachelib::grpc::GetResponse response;
 
@@ -352,7 +352,7 @@ TEST_F(CacheServiceTest, Stats) {
   }
 
   // Get stats
-  grpc::ClientContext context;
+  ::grpc::ClientContext context;
   cachelib::grpc::StatsRequest request;
   cachelib::grpc::StatsResponse response;
 
@@ -368,8 +368,78 @@ TEST_F(CacheServiceTest, Stats) {
   EXPECT_GT(response.uptime_seconds(), 0);
 }
 
+TEST_F(CacheServiceTest, SetReturnsSizeBytes) {
+  const std::string key = "size-test-key";
+  const std::string value = "hello world";  // 11 bytes
+
+  ::grpc::ClientContext context;
+  cachelib::grpc::SetRequest request;
+  cachelib::grpc::SetResponse response;
+
+  request.set_key(key);
+  request.set_value(value);
+
+  auto status = stub_->Set(&context, request, &response);
+  EXPECT_TRUE(status.ok()) << status.error_message();
+  EXPECT_TRUE(response.success());
+  EXPECT_EQ(response.size_bytes(), 11);
+}
+
+TEST_F(CacheServiceTest, ScanWithDetails) {
+  // Set some keys with known prefixes
+  for (int i = 0; i < 3; ++i) {
+    ::grpc::ClientContext context;
+    cachelib::grpc::SetRequest request;
+    cachelib::grpc::SetResponse response;
+
+    request.set_key("detail:" + std::to_string(i));
+    request.set_value(std::string(10 + i, 'x'));
+    request.set_ttl_seconds(300);
+
+    stub_->Set(&context, request, &response);
+  }
+
+  // Scan without details
+  {
+    ::grpc::ClientContext context;
+    cachelib::grpc::ScanRequest request;
+    cachelib::grpc::ScanResponse response;
+
+    request.set_pattern("detail:*");
+    request.set_include_details(false);
+
+    auto status = stub_->Scan(&context, request, &response);
+    EXPECT_TRUE(status.ok()) << status.error_message();
+    EXPECT_EQ(response.keys_size(), 3);
+    EXPECT_EQ(response.key_details_size(), 0);
+  }
+
+  // Scan with details
+  {
+    ::grpc::ClientContext context;
+    cachelib::grpc::ScanRequest request;
+    cachelib::grpc::ScanResponse response;
+
+    request.set_pattern("detail:*");
+    request.set_include_details(true);
+
+    auto status = stub_->Scan(&context, request, &response);
+    EXPECT_TRUE(status.ok()) << status.error_message();
+    EXPECT_EQ(response.keys_size(), 3);
+    EXPECT_EQ(response.key_details_size(), 3);
+
+    for (int i = 0; i < response.key_details_size(); ++i) {
+      const auto& info = response.key_details(i);
+      EXPECT_FALSE(info.key().empty());
+      EXPECT_GT(info.size_bytes(), 0);
+      EXPECT_GT(info.ttl_remaining(), 250);
+      EXPECT_LE(info.ttl_remaining(), 300);
+    }
+  }
+}
+
 TEST_F(CacheServiceTest, EmptyKeyError) {
-  grpc::ClientContext context;
+  ::grpc::ClientContext context;
   cachelib::grpc::SetRequest request;
   cachelib::grpc::SetResponse response;
 
@@ -377,7 +447,7 @@ TEST_F(CacheServiceTest, EmptyKeyError) {
   request.set_value("some-value");
 
   auto status = stub_->Set(&context, request, &response);
-  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_EQ(status.error_code(), ::grpc::StatusCode::INVALID_ARGUMENT);
 }
 
 TEST_F(CacheServiceTest, BinaryData) {
@@ -390,7 +460,7 @@ TEST_F(CacheServiceTest, BinaryData) {
 
   // Set binary data
   {
-    grpc::ClientContext context;
+    ::grpc::ClientContext context;
     cachelib::grpc::SetRequest request;
     cachelib::grpc::SetResponse response;
 
@@ -404,7 +474,7 @@ TEST_F(CacheServiceTest, BinaryData) {
 
   // Get and verify
   {
-    grpc::ClientContext context;
+    ::grpc::ClientContext context;
     cachelib::grpc::GetRequest request;
     cachelib::grpc::GetResponse response;
 
@@ -430,7 +500,7 @@ TEST_F(CacheServiceTest, ConcurrentRequests) {
 
         // Set
         {
-          grpc::ClientContext context;
+          ::grpc::ClientContext context;
           cachelib::grpc::SetRequest request;
           cachelib::grpc::SetResponse response;
 
@@ -444,7 +514,7 @@ TEST_F(CacheServiceTest, ConcurrentRequests) {
 
         // Get
         {
-          grpc::ClientContext context;
+          ::grpc::ClientContext context;
           cachelib::grpc::GetRequest request;
           cachelib::grpc::GetResponse response;
 
@@ -464,7 +534,7 @@ TEST_F(CacheServiceTest, ConcurrentRequests) {
   }
 
   // Verify with stats
-  grpc::ClientContext context;
+  ::grpc::ClientContext context;
   cachelib::grpc::StatsRequest request;
   cachelib::grpc::StatsResponse response;
 

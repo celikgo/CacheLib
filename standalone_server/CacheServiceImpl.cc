@@ -86,6 +86,7 @@ CacheServiceImpl::CacheServiceImpl(std::shared_ptr<CacheManager> cacheManager)
   response->set_success(success);
   if (success) {
     response->set_message("OK");
+    response->set_size_bytes(static_cast<int64_t>(request->value().size()));
   } else {
     response->set_message("Failed to set value");
   }
@@ -509,6 +510,9 @@ CacheServiceImpl::CacheServiceImpl(std::shared_ptr<CacheManager> cacheManager)
         auto* setResp = response.mutable_set();
         setResp->set_success(success);
         setResp->set_message(success ? "OK" : "Failed to set value");
+        if (success) {
+          setResp->set_size_bytes(static_cast<int64_t>(setReq.value().size()));
+        }
         break;
       }
       case ::cachelib::grpc::PipelineRequest::kDelete: {
@@ -562,11 +566,20 @@ CacheServiceImpl::CacheServiceImpl(std::shared_ptr<CacheManager> cacheManager)
   auto result = cacheManager_->scan(
       request->pattern(),
       request->cursor(),
-      request->count());
+      request->count(),
+      request->include_details());
 
   for (const auto& key : result.keys) {
     response->add_keys(key);
   }
+
+  for (const auto& info : result.keyDetails) {
+    auto* ki = response->add_key_details();
+    ki->set_key(info.key);
+    ki->set_ttl_remaining(info.ttlRemaining);
+    ki->set_size_bytes(info.sizeBytes);
+  }
+
   response->set_next_cursor(result.nextCursor);
   response->set_has_more(result.hasMore);
 

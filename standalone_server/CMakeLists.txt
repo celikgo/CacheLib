@@ -267,6 +267,7 @@ if(BUILD_TESTS)
     cache_service
     cache_manager
     cache_grpc_proto
+    cachelib
     GTest::gtest
     GTest::gtest_main
     gRPC::grpc++
