@@ -162,6 +162,10 @@ RUN mkdir -p cachelib-build && \
 # Create symlink for compatibility
 RUN ln -s /opt/cachelib /opt/cachelib-install
 
+# Copy magic_enum headers alongside CacheLib headers (needed by EventSink.h)
+RUN cp -r /opt/getdeps-install/magic_enum-*/include/magic_enum /opt/cachelib/include/magic_enum && \
+    ls /opt/cachelib/include/magic_enum/magic_enum.hpp
+
 # Build the gRPC server
 WORKDIR /build/CacheLib/standalone_server
 RUN mkdir -p build && \
