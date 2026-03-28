@@ -55,10 +55,17 @@ class Engine {
 
   // If insert is failed, previous item (if existed) is not affected and
   // remains available via lookup.
-  virtual Status insert(HashedKey hk, BufferView value) = 0;
+  // TODO: For now passing lastAccessTimeSecs as a param. This is
+  // temporary until ItemMetadata lands. After that, we will pass
+  // ItemMetadata as a param.
+  virtual Status insert(HashedKey hk,
+                        BufferView value,
+                        uint32_t lastAccessTimeSecs = 0) = 0;
 
   // Looks up a key in the engine.
-  virtual Status lookup(HashedKey hk, Buffer& value) = 0;
+  virtual Status lookup(HashedKey hk,
+                        Buffer& value,
+                        uint32_t& lastAccessTimeSecs) = 0;
 
   // Remove must not return Status::Retry.
   virtual Status remove(HashedKey hk) = 0;

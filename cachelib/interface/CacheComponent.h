@@ -21,6 +21,7 @@
 #include "cachelib/interface/CacheItem.h"
 #include "cachelib/interface/Handle.h"
 #include "cachelib/interface/Result.h"
+#include "cachelib/interface/Stats.h"
 
 namespace facebook::cachelib::interface {
 
@@ -118,6 +119,12 @@ class CacheComponent {
    */
   virtual folly::coro::Task<UnitResult> remove(ReadHandle&& handle) = 0;
 
+  /**
+   * Get stats for the cache component.
+   * @return stats for the cache component
+   */
+  virtual CacheComponentStats getStats() const noexcept = 0;
+
  protected:
   /**
    * Mark an item as inserted into cache.
@@ -135,6 +142,12 @@ class CacheComponent {
    * @param handle handle to release
    */
   FOLLY_ALWAYS_INLINE void releaseHandle(Handle&& handle) { handle.release(); }
+
+  /**
+   * Get a pointer to the inline buffer in the handle, suitable for placement
+   * new of a CacheItem subclass.
+   */
+  static void* getInlineBuf(Handle& handle) noexcept { return handle.buf_; }
 
  private:
   // ------------------------------ Interface ------------------------------ //
@@ -159,10 +172,28 @@ class CacheComponent {
    * @param inserted whether the item was previously inserted into the cache
    * (callbacks are typically only called when it was inserted)
    */
-  virtual folly::coro::Task<void> release(CacheItem& item, bool inserted) = 0;
+  virtual void release(CacheItem& item, bool inserted) = 0;
 
   friend class Handle;
   friend class WriteHandle;
+};
+
+/**
+ * A cache component that provides stats. Your implementation still needs to
+ * bump them!
+ */
+class CacheComponentWithStats : public CacheComponent {
+ public:
+  CacheComponentWithStats(
+      const CacheComponentStatsCollector::LatencySamplingConfig& config = {})
+      : stats_(std::make_unique<CacheComponentStatsCollector>(config)) {}
+
+  CacheComponentStats getStats() const noexcept override {
+    return CacheComponentStats(*stats_);
+  }
+
+ protected:
+  std::unique_ptr<CacheComponentStatsCollector> stats_;
 };
 
 } // namespace facebook::cachelib::interface

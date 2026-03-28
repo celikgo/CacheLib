@@ -1,5 +1,71 @@
 # CacheLib gRPC Server - Release Notes
 
+## v1.5.0 (2026-03-28)
+
+### Upstream Sync
+
+Merged **185 commits** from [facebook/CacheLib](https://github.com/facebook/CacheLib) upstream. Major highlights:
+
+#### New Features (from upstream)
+- **FixedSizeIndex**: Complete combined entry indexing system for the Navy SSD engine — CombinedEntryBlock, CombinedEntryManager, per-stream active CEB read/write
+- **Access time tracking**: New map to track last accessed timestamps for items, threaded through Navy lookup/read/write paths
+- **FlashCacheComponent**: New cache component with consistent hashing variant (`ConsistentFlashCacheComponent`)
+- **Custom reinsertion policy**: Cachebench now supports custom reinsertion policies
+- **Generic stats collection**: New `CacheComponent` stats interface with per-component counters
+- **Pre/post queue callbacks**: New hook points for queue processing
+
+#### Bug Fixes (from upstream)
+- **Mutex starvation fix**: `RegionManager::getCleanRegion` could starve under contention
+- **Data corruption fix**: Thread-local misuse across `co_await` boundaries
+- **Memory monitor fix**: Excessive advising/reclaiming loop
+- **Destructor race fix**: Race condition in item destructor callbacks
+- **File size calculation**: Fixed for multi-file NVM caches
+- **ObjectCache alignment**: Safe atomics for `updateObjectSize`
+- **CompressedPtrTest.Stats**: Fixed failing in opt builds
+- **Invalid key exceptions**: Now mention root cause in error message
+
+#### Build & Infrastructure (from upstream)
+- io_uring migrated from `folly/experimental/io` to `folly/io/async`
+- Updated to googletest v1.17.0
+- Ubuntu 24.04 as default GitHub Actions runner
+- Static lib handling for glog, gflags, c-ares, libevent, libaio
+- xxhash via cmake instead of manual find
+- Removed gperf dependency
+
+### Docker Improvements
+- **magic_enum via cmake**: Proper `find_package(magic_enum CONFIG)` support — no more header-only workaround
+- **Updated CMake patches**: Exception tracer libraries use new upstream names (`Folly::folly_debugging_exception_tracer_*`)
+- **Optional dependency handling**: `FBThrift::thrift_dynamic_value` and `magic_enum::magic_enum` checked conditionally for Docker compatibility
+
+### Upgrade
+
+```bash
+docker pull ghcr.io/celikgo/cachelib-grpc-server:1.5.0
+```
+
+All changes are backward-compatible. Existing clients work without modifications.
+
+### Docker
+
+```bash
+# Pull
+docker pull ghcr.io/celikgo/cachelib-grpc-server:1.5.0
+
+# Run
+docker run -d -p 50051:50051 -p 9090:9090 \
+  ghcr.io/celikgo/cachelib-grpc-server:1.5.0 \
+  --cache_size=2147483648
+
+# Verify
+docker run --rm ghcr.io/celikgo/cachelib-grpc-server:1.5.0 --version
+# cachelib-grpc-server 1.5.0
+
+# Prometheus metrics
+curl http://localhost:9090/metrics
+```
+
+---
+
 ## v1.4.0 (2026-03-24)
 
 ### Upgrade

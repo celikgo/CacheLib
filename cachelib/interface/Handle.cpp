@@ -16,8 +16,9 @@
 
 #include "cachelib/interface/Handle.h"
 
-#include <folly/coro/BlockingWait.h>
 #include <folly/logging/xlog.h>
+
+#include <cstring>
 
 #include "cachelib/interface/CacheComponent.h"
 
@@ -28,16 +29,27 @@ Handle::Handle(CacheComponent& cache, CacheItem& item, bool inserted) noexcept
   item_->incrementRefCount();
 }
 
+Handle::Handle(CacheComponent& cache, bool inserted, InlineItemTag) noexcept
+    : cache_(&cache),
+      item_(reinterpret_cast<CacheItem*>(buf_)),
+      inserted_(inserted) {}
+
 Handle::Handle(Handle&& other) noexcept
-    : cache_(other.cache_), item_(other.item_), inserted_(other.inserted_) {
+    : cache_(other.cache_), inserted_(other.inserted_) {
   XDCHECK_NE(cache_, nullptr) << "Invalid handle";
+  if (other.item_ == reinterpret_cast<CacheItem*>(other.buf_)) {
+    std::memcpy(buf_, other.buf_, kInlineBufSize);
+    item_ = reinterpret_cast<CacheItem*>(buf_);
+  } else {
+    item_ = other.item_;
+  }
   other.item_ = nullptr;
 }
 
 Handle::~Handle() noexcept {
   if (item_ != nullptr) {
     if (item_->decrementRefCount()) {
-      folly::coro::blockingWait(cache_->release(*item_, inserted_));
+      cache_->release(*item_, inserted_);
     }
     item_ = nullptr;
   }
@@ -45,6 +57,9 @@ Handle::~Handle() noexcept {
 
 WriteHandle::WriteHandle(CacheComponent& cache, CacheItem& item) noexcept
     : Handle(cache, item, /* inserted */ true) {}
+
+WriteHandle::WriteHandle(CacheComponent& cache, InlineItemTag) noexcept
+    : Handle(cache, /* inserted */ true, InlineItem) {}
 
 WriteHandle::WriteHandle(WriteHandle&& other) noexcept
     : Handle(std::move(other)),
@@ -62,11 +77,22 @@ WriteHandle::WriteHandle(CacheComponent& cache,
                          bool inserted) noexcept
     : Handle(cache, item, inserted) {}
 
+WriteHandle::WriteHandle(CacheComponent& cache,
+                         bool inserted,
+                         InlineItemTag) noexcept
+    : Handle(cache, inserted, InlineItem) {}
+
 AllocatedHandle::AllocatedHandle(CacheComponent& cache,
                                  CacheItem& item) noexcept
     : WriteHandle(cache, item, /* inserted */ false) {}
 
+AllocatedHandle::AllocatedHandle(CacheComponent& cache, InlineItemTag) noexcept
+    : WriteHandle(cache, /* inserted */ false, InlineItem) {}
+
 ReadHandle::ReadHandle(CacheComponent& cache, CacheItem& item) noexcept
     : Handle(cache, item, /* inserted */ true) {}
+
+ReadHandle::ReadHandle(CacheComponent& cache, InlineItemTag) noexcept
+    : Handle(cache, /* inserted */ true, InlineItem) {}
 
 } // namespace facebook::cachelib::interface

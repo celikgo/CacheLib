@@ -22,7 +22,9 @@
 #include <memory>
 
 #include "cachelib/allocator/CacheAllocator.h"
+#include "cachelib/allocator/KAllocation.h"
 #include "cachelib/allocator/tests/NvmTestUtils.h"
+#include "cachelib/common/TestUtils.h"
 #include "cachelib/object_cache/ObjectCache.h"
 #include "cachelib/object_cache/tests/gen-cpp2/test_object_types.h"
 
@@ -86,6 +88,7 @@ class ObjectCacheTest : public ::testing::Test {
     for (size_t i = 0; i < maxKeySizes.size(); i++) {
       EXPECT_TRUE(allocSizes[i] >= ObjectCache::kL1AllocSizeMin);
       EXPECT_TRUE(maxKeySizes[i] + sizeof(ObjectCacheItem) +
+                      ObjectCache::getValueAlignmentPadding(maxKeySizes[i]) +
                       sizeof(typename AllocatorT::Item) <=
                   allocSizes[i]);
       EXPECT_TRUE(allocSizes[i] % 8 == 0);
@@ -651,7 +654,7 @@ class ObjectCacheTest : public ::testing::Test {
          itr != objcache.getL1Cache().end();
          ++itr) {
       totalObjectSize +=
-          reinterpret_cast<const ObjectCacheItem*>(itr.asHandle()->getMemory())
+          ObjectCache::getAlignedItemPtr(itr.asHandle()->getMemory())
               ->objectSize;
     }
     EXPECT_EQ(totalObjectSize, objcache.getTotalObjectSize());
@@ -824,22 +827,32 @@ class ObjectCacheTest : public ::testing::Test {
         });
     config.objectSizeTrackingEnabled = true;
     auto objcache = ObjectCache::create(config);
+    size_t curCacheSize = 0;
 
-    auto [_, ptr, __] = objcache->insertOrReplace(
-        "foo", std::make_unique<ObjectType>(), sizeof(ObjectType));
-    EXPECT_EQ(sizeof(ObjectType), objcache->getObjectSize(ptr));
-    EXPECT_EQ(sizeof(ObjectType), objcache->getTotalObjectSize());
+    for (size_t keySize = 1; keySize < KAllocation::kKeyMaxLenSmall;
+         keySize++) {
+      std::string key(keySize, 'f');
+      auto [_, ptr, __] = objcache->insertOrReplace(
+          key, std::make_unique<ObjectType>(), sizeof(ObjectType));
+      EXPECT_EQ(sizeof(ObjectType), objcache->getObjectSize(ptr));
+      EXPECT_EQ(sizeof(ObjectType) + curCacheSize,
+                objcache->getTotalObjectSize());
 
-    auto found = objcache->template findToWrite<ObjectType>("foo");
-    ASSERT_NE(nullptr, found);
+      auto found = objcache->template findToWrite<ObjectType>(key);
+      ASSERT_NE(nullptr, found);
 
-    *found = "longgggggggggggggggggggggggggggstringgggggggggggg";
-    const size_t newSize = sizeof(*found) + found->size();
-    const auto updated = objcache->updateObjectSize(ptr, newSize);
-    ASSERT_TRUE(updated);
+      *found = "longgggggggggggggggggggggggggggstringgggggggggggg";
+      const size_t newSize = sizeof(*found) + found->size();
+      ASSERT_TRUE(objcache->updateObjectSize(ptr, newSize));
 
-    EXPECT_EQ(newSize, objcache->getObjectSize(ptr));
-    EXPECT_EQ(newSize, objcache->getTotalObjectSize());
+      EXPECT_EQ(newSize, objcache->getObjectSize(ptr));
+      EXPECT_EQ(newSize + curCacheSize, objcache->getTotalObjectSize());
+      curCacheSize += newSize;
+    }
+
+    util::StatsMap stats;
+    objcache->getObjectCacheCounters(stats.createCountVisitor());
+    EXPECT_GT(stats.getCounts().at("objcache.key_padding_bytes"), 0);
   }
 
   void testMultithreadObjectSizeTrackingWithMutation() {
@@ -1240,8 +1253,7 @@ class ObjectCacheTest : public ::testing::Test {
       auto evictItr = objcache.getEvictionIterator(poolId);
       std::vector<std::string> content;
       while (evictItr) {
-        auto* itemPtr = reinterpret_cast<typename ObjectCache::Item*>(
-            evictItr->getMemory());
+        auto* itemPtr = ObjectCache::getAlignedItemPtr(evictItr->getMemory());
         auto* objectPtr = reinterpret_cast<ThriftFoo*>(itemPtr->objectPtr);
         content.push_back(folly::sformat("{}: a {} b {} c {}",
                                          evictItr->getKey(),
@@ -2353,8 +2365,6 @@ TEST(ObjectCacheTest, DynamicFreeMemorySizeControlTest) {
   });
 
   auto objcache = ObjectCache::create(config);
-  std::cout << "[Test Start] Initial entries limit: "
-            << objcache->getCurrentEntriesLimit() << std::endl;
 
   auto waitForEntriesLimitDecrease = [&](size_t initialLimit,
                                          std::chrono::milliseconds timeout) {
@@ -2380,6 +2390,21 @@ TEST(ObjectCacheTest, DynamicFreeMemorySizeControlTest) {
     return false;
   };
 
+  // Waits for entries limit to stabilize.
+  auto waitForEntriesLimitToSettle = [&]() {
+    size_t lastValue = objcache->getCurrentEntriesLimit();
+    return test_util::eventuallyTrue(
+        [&]() {
+          auto currentValue = objcache->getCurrentEntriesLimit();
+          if (currentValue != lastValue) {
+            lastValue = currentValue;
+            return false;
+          }
+          return true;
+        },
+        2 /* timeoutSecs */);
+  };
+
   EXPECT_EQ(objcache->getCurrentEntriesLimit(), maxNumEntries);
   EXPECT_EQ(objcache->getNumEntries(), 0);
 
@@ -2390,15 +2415,9 @@ TEST(ObjectCacheTest, DynamicFreeMemorySizeControlTest) {
   }
 
   EXPECT_EQ(objcache->getNumEntries(), maxNumEntries);
-  // we can expect our entries limit to be expanding or at least
-  // not receeding as free memory callback returns above the lower and upper
-  // limit
   EXPECT_GE(objcache->getCurrentEntriesLimit(), maxNumEntries);
-  std::cout << "[After Fill] Entries: " << objcache->getNumEntries()
-            << ", Limit: " << objcache->getCurrentEntriesLimit() << std::endl;
 
-  std::cout << "[Test] Setting free memory to 5 MB (below lower limit of "
-            << lowerLimitBytes / kMB << " MB)" << std::endl;
+  // Test 1: Shrink when free memory is below lower limit
   currentFreeMem.store(5 * kMB);
 
   EXPECT_TRUE(
@@ -2407,13 +2426,14 @@ TEST(ObjectCacheTest, DynamicFreeMemorySizeControlTest) {
   auto entriesAfterShrink = objcache->getCurrentEntriesLimit();
   auto numEntriesAfterShrink = objcache->getNumEntries();
 
-  std::cout << "[After Shrink] Entries: " << numEntriesAfterShrink
-            << ", Limit: " << entriesAfterShrink << std::endl;
   EXPECT_LT(entriesAfterShrink, maxNumEntries);
   EXPECT_LT(numEntriesAfterShrink, maxNumEntries);
 
-  std::cout << "[Test] Setting free memory to 20 MB (above lower limit)"
-            << std::endl;
+  // Test 2: Stable zone - verify cache stops oscillating
+  currentFreeMem.store(12 * kMB);
+  EXPECT_TRUE(waitForEntriesLimitToSettle());
+
+  // Test 3: Expand when free memory is above upper limit
   currentFreeMem.store(20 * kMB);
 
   for (size_t i = 0; i < 10; i++) {
@@ -2426,12 +2446,7 @@ TEST(ObjectCacheTest, DynamicFreeMemorySizeControlTest) {
       waitForEntriesLimitIncrease(entriesAfterShrink, std::chrono::seconds(2)));
 
   auto entriesAfterExpand = objcache->getCurrentEntriesLimit();
-  std::cout << "[After Expand] Entries: " << objcache->getNumEntries()
-            << ", Limit: " << entriesAfterExpand << std::endl;
 
   EXPECT_GT(entriesAfterExpand, entriesAfterShrink);
-  std::cout << "[Test Complete] Cache shrunk from " << maxNumEntries << " to "
-            << entriesAfterShrink << ", then expanded to " << entriesAfterExpand
-            << std::endl;
 }
 } // namespace facebook::cachelib::objcache2::test

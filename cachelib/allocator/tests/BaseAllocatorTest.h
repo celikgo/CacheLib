@@ -5925,26 +5925,53 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
       EXPECT_NO_THROW(alloc.throwIfKeyInvalid(key));
     }
     {
-      // 1) invalid due to key length
+      // 1) invalid due to key length - verify exception message mentions the
+      // root cause
       auto key = std::string(KAllocation::kKeyMaxLenSmall + 1, 'a');
       EXPECT_FALSE(alloc.isKeyValid(key));
-      EXPECT_THROW(alloc.throwIfKeyInvalid(key), std::invalid_argument);
+      try {
+        alloc.throwIfKeyInvalid(key);
+        FAIL() << "Expected std::invalid_argument";
+      } catch (const std::invalid_argument& e) {
+        std::string msg = e.what();
+        EXPECT_TRUE(msg.find("exceeds maximum allowed") != std::string::npos)
+            << "Exception message should mention key size exceeds maximum. "
+               "Actual: "
+            << msg;
+      }
     }
     {
-      // 2) invalid due to size being 0
+      // 2) invalid due to size being 0 - verify exception message mentions the
+      // root cause
       auto string = std::string{"some string"};
       auto key = folly::StringPiece{string.data(), std::size_t{0}};
       EXPECT_FALSE(alloc.isKeyValid(key));
-      EXPECT_THROW(alloc.throwIfKeyInvalid(key), std::invalid_argument);
+      try {
+        alloc.throwIfKeyInvalid(key);
+        FAIL() << "Expected std::invalid_argument";
+      } catch (const std::invalid_argument& e) {
+        std::string msg = e.what();
+        EXPECT_TRUE(msg.find("key is empty") != std::string::npos)
+            << "Exception message should mention key is empty. Actual: " << msg;
+      }
     }
     // Note: we don't test for a null stringpiece with positive size as the
     // key
     //       because folly::StringPiece now throws an exception for it
     {
-      // 3) invalid due due a null key
+      // 3) invalid due due a null key - verify exception message mentions the
+      // root cause
       auto key = folly::StringPiece{nullptr, std::size_t{0}};
       EXPECT_FALSE(alloc.isKeyValid(key));
-      EXPECT_THROW(alloc.throwIfKeyInvalid(key), std::invalid_argument);
+      try {
+        alloc.throwIfKeyInvalid(key);
+        FAIL() << "Expected std::invalid_argument";
+      } catch (const std::invalid_argument& e) {
+        std::string msg = e.what();
+        EXPECT_TRUE(msg.find("null data pointer") != std::string::npos)
+            << "Exception message should mention null data pointer. Actual: "
+            << msg;
+      }
     }
   }
 
@@ -5961,26 +5988,53 @@ class BaseAllocatorTest : public AllocatorTest<AllocatorT> {
       EXPECT_NO_THROW(alloc.throwIfKeyInvalid(key));
     }
     {
-      // 1) invalid due to key length
+      // 1) invalid due to key length - verify exception message mentions the
+      // root cause
       auto key = std::string(KAllocation::kKeyMaxLen + 1, 'a');
       EXPECT_FALSE(alloc.isKeyValid(key));
-      EXPECT_THROW(alloc.throwIfKeyInvalid(key), std::invalid_argument);
+      try {
+        alloc.throwIfKeyInvalid(key);
+        FAIL() << "Expected std::invalid_argument";
+      } catch (const std::invalid_argument& e) {
+        std::string msg = e.what();
+        EXPECT_TRUE(msg.find("exceeds maximum allowed") != std::string::npos)
+            << "Exception message should mention key size exceeds maximum. "
+               "Actual: "
+            << msg;
+      }
     }
     {
-      // 2) invalid due to size being 0
+      // 2) invalid due to size being 0 - verify exception message mentions the
+      // root cause
       auto string = std::string{"some string"};
       auto key = folly::StringPiece{string.data(), std::size_t{0}};
       EXPECT_FALSE(alloc.isKeyValid(key));
-      EXPECT_THROW(alloc.throwIfKeyInvalid(key), std::invalid_argument);
+      try {
+        alloc.throwIfKeyInvalid(key);
+        FAIL() << "Expected std::invalid_argument";
+      } catch (const std::invalid_argument& e) {
+        std::string msg = e.what();
+        EXPECT_TRUE(msg.find("key is empty") != std::string::npos)
+            << "Exception message should mention key is empty. Actual: " << msg;
+      }
     }
     // Note: we don't test for a null stringpiece with positive size as the
     // key
     //       because folly::StringPiece now throws an exception for it
     {
-      // 3) invalid due due a null key
+      // 3) invalid due due a null key - verify exception message mentions the
+      // root cause
       auto key = folly::StringPiece{nullptr, std::size_t{0}};
       EXPECT_FALSE(alloc.isKeyValid(key));
-      EXPECT_THROW(alloc.throwIfKeyInvalid(key), std::invalid_argument);
+      try {
+        alloc.throwIfKeyInvalid(key);
+        FAIL() << "Expected std::invalid_argument";
+      } catch (const std::invalid_argument& e) {
+        std::string msg = e.what();
+        EXPECT_TRUE(msg.find("null data pointer") != std::string::npos)
+            << "Exception message should mention null data pointer. Actual: "
+            << msg;
+      }
     }
   }
 

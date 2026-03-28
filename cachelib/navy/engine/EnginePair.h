@@ -67,11 +67,16 @@ class EnginePair {
   uint64_t estimateWriteSize(HashedKey hk, BufferView value) const;
 
   // Schedule an insert.
-  void scheduleInsert(HashedKey hk, BufferView value, InsertCallback cb);
+  void scheduleInsert(HashedKey hk,
+                      BufferView value,
+                      InsertCallback cb,
+                      uint32_t lastAccessTimeSecs = 0);
 
   // Perform lookup by keeping retrying until a result (Ok, NotFound, Error) is
   // reached.
-  Status lookupSync(HashedKey hk, Buffer& value) const;
+  Status lookupSync(HashedKey hk,
+                    Buffer& value,
+                    uint32_t& lastAccessTimeSecs) const;
 
   // Perform remove by keeping retrying until a result (Ok, NotFound, Error) is
   // reached.
@@ -127,11 +132,15 @@ class EnginePair {
   // Perform lookup in a retry friendly manner.
   Status lookupInternal(HashedKey hk,
                         Buffer& value,
-                        bool& skipLargeItemCache) const;
+                        bool& skipLargeItemCache,
+                        uint32_t& lastAccessTimeSecs) const;
 
   // insert an item to one of the engine and remove it from the other.
   // An option can be specified to skip insertion on retry.
-  Status insertInternal(HashedKey key, BufferView value, bool& skipInsertion);
+  Status insertInternal(HashedKey key,
+                        BufferView value,
+                        bool& skipInsertion,
+                        uint32_t lastAccessTimeSecs = 0);
 
   // Performa a remove by hashed key in a retry friendly manner.
   Status removeHashedKeyInternal(HashedKey hk, bool& skipSmallItemCache);

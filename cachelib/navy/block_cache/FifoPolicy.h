@@ -19,7 +19,6 @@
 #include <folly/fibers/TimedMutex.h>
 
 #include <deque>
-#include <set>
 
 #include "cachelib/navy/block_cache/EvictionPolicy.h"
 

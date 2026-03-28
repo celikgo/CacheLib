@@ -36,26 +36,40 @@ add_dependencies(cachelib_common thrift_generated_files)
 # Find xxhash library
 find_library(XXHASH_LIBRARY xxhash)
 
-# Check for optional folly exception tracer targets
+# Check for optional folly exception tracer targets (new naming convention)
 set(FOLLY_EXCEPTION_LIBS "")
-if(TARGET Folly::folly_exception_tracer)
-  list(APPEND FOLLY_EXCEPTION_LIBS Folly::folly_exception_tracer)
+if(TARGET Folly::folly_debugging_exception_tracer_exception_tracer)
+  list(APPEND FOLLY_EXCEPTION_LIBS Folly::folly_debugging_exception_tracer_exception_tracer)
 endif()
-if(TARGET Folly::folly_exception_tracer_base)
-  list(APPEND FOLLY_EXCEPTION_LIBS Folly::folly_exception_tracer_base)
+if(TARGET Folly::folly_debugging_exception_tracer_exception_tracer_base)
+  list(APPEND FOLLY_EXCEPTION_LIBS Folly::folly_debugging_exception_tracer_exception_tracer_base)
 endif()
-if(TARGET Folly::folly_exception_counter)
-  list(APPEND FOLLY_EXCEPTION_LIBS Folly::folly_exception_counter)
+if(TARGET Folly::folly_debugging_exception_tracer_exception_counter)
+  list(APPEND FOLLY_EXCEPTION_LIBS Folly::folly_debugging_exception_tracer_exception_counter)
+endif()
+
+# Check for optional FBThrift dynamic value target
+set(FBTHRIFT_EXTRA_LIBS "")
+if(TARGET FBThrift::thrift_dynamic_value)
+  list(APPEND FBTHRIFT_EXTRA_LIBS FBThrift::thrift_dynamic_value)
+endif()
+
+# Check for optional magic_enum target
+set(MAGIC_ENUM_LIBS "")
+if(TARGET magic_enum::magic_enum)
+  list(APPEND MAGIC_ENUM_LIBS magic_enum::magic_enum)
 endif()
 
 target_link_libraries(cachelib_common PUBLIC
   Threads::Threads
   FBThrift::thriftcpp2
   FBThrift::thriftprotocol
+  ${FBTHRIFT_EXTRA_LIBS}
   Folly::folly
   Folly::follybenchmark
   ${FOLLY_EXCEPTION_LIBS}
   GTest::gtest
+  ${MAGIC_ENUM_LIBS}
   ${XXHASH_LIBRARY}
 )
 

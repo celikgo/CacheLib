@@ -17,9 +17,11 @@
 #include <folly/testing/TestUtil.h>
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <magic_enum/magic_enum.hpp>
 #include <numeric>
+#include <thread>
 
 #include "cachelib/allocator/CacheAllocator.h"
 #include "cachelib/allocator/nvmcache/BlockCacheReinsertionPolicy.h"
@@ -176,7 +178,7 @@ class EventTrackerTest : public ::testing::Test {
   std::unique_ptr<EventTracker> createEventTracker(const std::string& filePath,
                                                    uint32_t samplingRate = 1) {
     EventTracker::Config config;
-    config.samplingRate = samplingRate;
+    config.sampler = std::make_unique<FurcHashSampler>(samplingRate);
     config.queueSize = 1000;
     config.eventSink = std::make_unique<FileEventSink>(filePath);
     return std::make_unique<EventTracker>(std::move(config));
@@ -190,7 +192,8 @@ class EventTrackerTest : public ::testing::Test {
       endIdx = events.size();
     }
     for (uint32_t i = startIdx; i < endIdx; i++) {
-      tracker->record(events.at(i));
+      EventInfo event = events.at(i);
+      tracker->record(event);
     }
   }
 };
@@ -219,10 +222,18 @@ TEST_F(EventTrackerTest, SamplingRateChange) {
   folly::test::TemporaryFile tmpFile;
 
   {
-    auto eventTracker = createEventTracker(tmpFile.path().string());
+    auto sampler = std::make_unique<FurcHashSampler>(1);
+    auto* samplerPtr = sampler.get();
+
+    EventTracker::Config config;
+    config.sampler = std::move(sampler);
+    config.queueSize = 1000;
+    config.eventSink = std::make_unique<FileEventSink>(tmpFile.path().string());
+    auto eventTracker = std::make_unique<EventTracker>(std::move(config));
+
     recordEvents(eventTracker.get(), events, 0, numItems / 2);
 
-    eventTracker->setSamplingRate(3);
+    samplerPtr->setSamplingRate(3);
 
     recordEvents(eventTracker.get(), events, numItems / 2, numItems);
   }
@@ -262,7 +273,7 @@ TEST_F(EventTrackerTest, NvmAdmitWithSize) {
 
   {
     EventTracker::Config config;
-    config.samplingRate = 1;
+    config.sampler = std::make_unique<FurcHashSampler>(1);
     config.queueSize = 1000;
     config.eventSink = std::make_unique<FileEventSink>(
         tmpFile.path().string(),
@@ -348,7 +359,7 @@ TEST_F(EventTrackerTest, NvmCacheWithEventTracker) {
 
   // Create an EventTracker with in-memory sink and set it on the allocator
   EventTracker::Config trackerConfig;
-  trackerConfig.samplingRate = 1;
+  trackerConfig.sampler = std::make_unique<FurcHashSampler>(1);
   trackerConfig.queueSize = 10000; // Larger queue to capture more events
   trackerConfig.eventSink = std::move(inMemorySink);
 
@@ -454,4 +465,67 @@ TEST_F(EventTrackerTest, NvmCacheWithEventTracker) {
     std::cout << "Event: " << magic_enum::enum_name(event)
               << ", Count: " << count << std::endl;
   }
+}
+
+TEST_F(EventTrackerTest, PreAndPostQueueCallbacks) {
+  auto inMemorySink = std::make_unique<InMemoryEventSink>();
+  auto* sinkPtr = inMemorySink.get();
+
+  std::atomic<bool> preCallbackInvoked{false};
+  std::atomic<bool> postCallbackInvoked{false};
+  std::vector<EventInfo> records;
+
+  {
+    EventTracker::Config config;
+    config.sampler = std::make_unique<FurcHashSampler>(1);
+    config.queueSize = 100;
+    config.eventSink = std::move(inMemorySink);
+
+    config.preQueueCallback = [&preCallbackInvoked](EventInfo& info) {
+      preCallbackInvoked.store(true);
+      info.appId = 42;
+    };
+
+    config.postQueueCallback = [&postCallbackInvoked](EventInfo& info) {
+      postCallbackInvoked.store(true);
+      info.usecaseId = 99;
+    };
+
+    auto tracker = std::make_unique<EventTracker>(std::move(config));
+
+    EventInfo eventInfo;
+    eventInfo.key = "test_callback_key";
+    eventInfo.event = AllocatorApiEvent::FIND;
+    eventInfo.result = AllocatorApiResult::FOUND;
+    eventInfo.eventTimestamp = 12345;
+    eventInfo.size = 512;
+
+    auto result = tracker->record(eventInfo);
+    ASSERT_EQ(result, RecordResult::QUEUED);
+
+    // Wait for background thread to process the event
+    while (sinkPtr->getRecords().empty()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // Capture records before the tracker and sink are destroyed
+    records = sinkPtr->getRecords();
+  }
+
+  EXPECT_TRUE(preCallbackInvoked.load());
+  EXPECT_TRUE(postCallbackInvoked.load());
+
+  ASSERT_EQ(records.size(), 1);
+
+  const auto& logged = records[0];
+  EXPECT_EQ(logged.key, "test_callback_key");
+  EXPECT_EQ(logged.event, AllocatorApiEvent::FIND);
+  EXPECT_EQ(logged.result, AllocatorApiResult::FOUND);
+  EXPECT_EQ(logged.eventTimestamp, 12345);
+  EXPECT_TRUE(logged.size.has_value());
+  EXPECT_EQ(*logged.size, 512);
+  EXPECT_TRUE(logged.appId.has_value());
+  EXPECT_EQ(*logged.appId, 42);
+  EXPECT_TRUE(logged.usecaseId.has_value());
+  EXPECT_EQ(*logged.usecaseId, 99);
 }

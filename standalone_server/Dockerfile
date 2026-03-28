@@ -91,10 +91,16 @@ RUN GRPC_HEALTH_PROBE_VERSION=v0.4.25 && \
 # kernel features not available in Docker VM. By not having liburing,
 # folly will build without io_uring support.
 
-# Install magic_enum (header-only library required by CacheLib)
+# Install magic_enum via cmake (creates config files for find_package)
 RUN git clone --depth 1 --branch v0.9.5 https://github.com/Neargye/magic_enum.git && \
-    mkdir -p /usr/local/include/magic_enum && \
-    cp magic_enum/include/magic_enum/*.hpp /usr/local/include/magic_enum/ && \
+    cd magic_enum && \
+    mkdir build && cd build && \
+    cmake -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DMAGIC_ENUM_OPT_BUILD_TESTS=OFF \
+          -DMAGIC_ENUM_OPT_BUILD_EXAMPLES=OFF \
+          .. && \
+    make install && \
+    cd /build && \
     rm -rf magic_enum
 
 # Clone CacheLib from GitHub (ensures all dependencies are properly fetched)

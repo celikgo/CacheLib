@@ -41,8 +41,11 @@ namespace interface {
  * Although all APIs use coroutines (according to the CacheComponent interface),
  * they are synchronous under the hood.
  */
-class RAMCacheComponent : public CacheComponent {
+class RAMCacheComponent : public CacheComponentWithStats {
  public:
+  using LatencySamplingConfig =
+      CacheComponentStatsCollector::LatencySamplingConfig;
+
   /**
    * Pool configuration. RAMCacheComponent includes only 1 pool - to add more
    * pools, create more RAMCacheComponents.
@@ -67,10 +70,14 @@ class RAMCacheComponent : public CacheComponent {
    *
    * @param allocConfig the LruAllocatorConfig to use for the cache
    * @param poolConfig the pool configuration for the cache's only pool
+   * @param latencySamplingConfig the sampling config for latency cache counters
    * @return RAMCacheComponent if the config is valid, an error otherwise
    */
-  static Result<RAMCacheComponent> create(LruAllocatorConfig&& allocConfig,
-                                          PoolConfig&& poolConfig) noexcept;
+  static Result<RAMCacheComponent> create(
+      LruAllocatorConfig&& allocConfig,
+      PoolConfig&& poolConfig,
+      const LatencySamplingConfig& latencySamplingConfig = {
+          .find_ = 100, .findToWrite_ = 100}) noexcept;
 
   /**
    * Escape hatch to allow users to get the underlying LruAllocator. Should be
@@ -93,17 +100,21 @@ class RAMCacheComponent : public CacheComponent {
       Key key) override;
   folly::coro::Task<Result<bool>> remove(Key key) override;
   folly::coro::Task<UnitResult> remove(ReadHandle&& handle) override;
+  CacheComponentStats getStats() const noexcept override;
 
  private:
   std::unique_ptr<LruAllocator> cache_;
+  mutable std::chrono::steady_clock::time_point lastStatsCollectionTime_;
   PoolId defaultPool_;
 
-  explicit RAMCacheComponent(LruAllocatorConfig&& config);
+  explicit RAMCacheComponent(
+      LruAllocatorConfig&& config,
+      const LatencySamplingConfig& latencySamplingConfig);
 
   // ------------------------------ Interface ------------------------------ //
 
   UnitResult writeBack(CacheItem& item) override;
-  folly::coro::Task<void> release(CacheItem& item, bool inserted) override;
+  void release(CacheItem& item, bool inserted) override;
 };
 
 } // namespace interface

@@ -62,10 +62,11 @@ class ProcessFactory : public folly::NonCopyableNonMovable {
 //
 // @throws std::runtime_error if the device is not recognized or an error occurs
 //         when running the `nvme` command.
-uint64_t nandWriteBytes(const folly::StringPiece deviceName,
-                        const folly::StringPiece nvmePath = "/usr/sbin/nvme",
-                        std::shared_ptr<ProcessFactory> processFactory =
-                            std::make_shared<ProcessFactory>());
+uint64_t nandWriteBytes(
+    const folly::StringPiece deviceName,
+    const folly::StringPiece nvmePath = "/usr/local/sbin/nvme",
+    std::shared_ptr<ProcessFactory> processFactory =
+        std::make_shared<ProcessFactory>());
 
 } // namespace hw
 } // namespace facebook

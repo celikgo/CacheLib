@@ -28,6 +28,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "cachelib/allocator/nvmcache/AccessTimeMap.h"
 #include "cachelib/allocator/nvmcache/CacheApiWrapper.h"
 #include "cachelib/allocator/nvmcache/InFlightPuts.h"
 #include "cachelib/allocator/nvmcache/NavyConfig.h"
@@ -353,6 +354,15 @@ class NvmCache {
 
   detail::Stats& stats() { return CacheAPIWrapperForNvm<C>::getStats(cache_); }
 
+  // Returns true if the NVM item would be routed to BlockCache (large item
+  // engine) rather than BigHash (small item engine).
+  // Delegates to navy::isItemLarge() (navy/common/Types.h) which is the
+  // shared routing predicate also used by EnginePair::isItemLarge().
+  bool isNvmItemLarge(folly::StringPiece key, const NvmItem& nvmItem) const {
+    return navy::isItemLarge(key.size(), nvmItem.totalSize(),
+                             smallItemMaxSize_);
+  }
+
   // creates the RAM item from NvmItem.
   //
   // @param key   key for the nvm item
@@ -534,7 +544,8 @@ class NvmCache {
   void onGetComplete(GetCtx& ctx,
                      navy::Status s,
                      HashedKey key,
-                     navy::BufferView value);
+                     navy::BufferView value,
+                     uint32_t lastAccessTimeSecs);
 
   void evictCB(HashedKey hk, navy::BufferView val, navy::DestructorEvent e);
 
@@ -587,6 +598,18 @@ class NvmCache {
   // to handle any racy eviction from NVM before the NvmCache::remove is
   // finished.
   std::vector<folly::F14FastSet<std::string>> itemRemoved_;
+
+  // Tracks the most recent DRAM last-access timestamp for items in NVM.
+  // It is best offered and not updated on every DRAM access so could sometime
+  // have stale value which represents the promotion timestamp.
+  // Populated on DRAM eviction of NvmClean BlockCache items;
+  // consumed during BlockCache region reclaim to write fresh timestamps.
+  std::unique_ptr<AccessTimeMap> accessTimeMap_;
+
+  // BigHash small-item threshold from NavyConfig. Items with
+  // key.size() + nvmBufferSize <= this threshold go to BigHash.
+  // 0 means BigHash is not configured and all items go to BlockCache.
+  const uint64_t smallItemMaxSize_;
 
   std::unique_ptr<cachelib::navy::AbstractCache> navyCache_;
 
@@ -795,8 +818,9 @@ typename NvmCache<C>::WriteHandle NvmCache<C>::find(HashedKey hk) {
 
   navyCache_->lookupAsync(
       HashedKey::precomputed(ctx->getKey(), hk.keyHash()),
-      [this, ctx](navy::Status s, HashedKey k, navy::Buffer v) {
-        this->onGetComplete(*ctx, s, k, v.view());
+      [this, ctx](navy::Status s, HashedKey k, navy::Buffer v,
+                  uint32_t lastAccessTimeSecs) {
+        this->onGetComplete(*ctx, s, k, v.view(), lastAccessTimeSecs);
       });
   guard.dismiss();
   return hdl;
@@ -866,7 +890,8 @@ typename NvmCache<C>::WriteHandle NvmCache<C>::peek(folly::StringPiece key) {
   // no need for fill lock or inspecting the state of other concurrent
   // operations since we only want to check the state for debugging purposes.
   navyCache_->lookupAsync(
-      HashedKey{key}, [&, this](navy::Status st, HashedKey, navy::Buffer v) {
+      HashedKey{key},
+      [&, this](navy::Status st, HashedKey, navy::Buffer v, uint32_t) {
         if (st != navy::Status::NotFound) {
           auto nvmItem = reinterpret_cast<const NvmItem*>(v.data());
           hdl = createItem(key, *nvmItem);
@@ -1055,7 +1080,15 @@ NvmCache<C>::NvmCache(C& c,
       tombstones_(numShards_),
       itemDestructor_(itemDestructor),
       itemDestructorMutex_(numShards_),
-      itemRemoved_(numShards_) {
+      itemRemoved_(numShards_),
+      accessTimeMap_(
+          config_.navyConfig.getEnableAccessTimeMap()
+              ? std::make_unique<AccessTimeMap>(
+                    numShards_, config_.navyConfig.getAccessTimeMapMaxSize())
+              : nullptr),
+      smallItemMaxSize_(config_.navyConfig.isBigHashEnabled()
+                            ? config_.navyConfig.bigHash().getSmallItemMaxSize()
+                            : 0) {
   navyCache_ = createNavyCache(
       config_.navyConfig,
       checkExpired_,
@@ -1228,7 +1261,8 @@ void NvmCache<C>::put(Item& item, PutToken token) {
           }
           recordEvent(AllocatorApiEvent::NVM_INSERT, key.key(), eventRes);
           putCleanup();
-        });
+        },
+        item.getLastAccessTime());
 
     if (status == navy::Status::Ok) {
       guard.dismiss();
@@ -1265,7 +1299,8 @@ template <typename C>
 void NvmCache<C>::onGetComplete(GetCtx& ctx,
                                 navy::Status status,
                                 HashedKey hk,
-                                navy::BufferView val) {
+                                navy::BufferView val,
+                                uint32_t lastAccessTimeSecs) {
   auto guard =
       folly::makeGuard([&ctx, hk]() { ctx.cache.removeFromFillMap(hk); });
   // navy got disabled while we were fetching. If so, safely return a miss.
@@ -1330,6 +1365,16 @@ void NvmCache<C>::onGetComplete(GetCtx& ctx,
 
   recordEvent(AllocatorApiEvent::NVM_FIND, hk.key(), AllocatorApiResult::FOUND,
               nvmItem);
+
+  // Track NVM hit time-to-access for every NVM hit, regardless of whether
+  // the DRAM promotion succeeds (another thread may have already promoted).
+  // TTA = currentTime - lastAccessTimeSecs (how long ago item was last
+  // accessed). Guard > 0 because BigHash doesn't store access time.
+  if (lastAccessTimeSecs > 0) {
+    auto ttaSecs = util::getCurrentTimeSec() - lastAccessTimeSecs;
+    stats().nvmHitTTASecs_.trackValue(ttaSecs);
+  }
+
   // by the time we filled from navy, another thread inserted in RAM. We
   // disregard.
   if (CacheAPIWrapperForNvm<C>::insertFromNvm(cache_, it)) {
@@ -1629,6 +1674,9 @@ template <typename C>
 util::StatsMap NvmCache<C>::getStatsMap() const {
   util::StatsMap statsMap;
   navyCache_->getCounters(statsMap.createCountVisitor());
+  if (accessTimeMap_) {
+    accessTimeMap_->getCounters(statsMap.createCountVisitor());
+  }
   statsMap.insertCount("items_tracked_for_destructor", getNvmItemRemovedSize());
   return statsMap;
 }

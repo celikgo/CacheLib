@@ -162,6 +162,10 @@ class TestCacheComponent : public CacheComponent {
     co_return folly::unit;
   }
 
+  CacheComponentStats getStats() const noexcept override {
+    return CacheComponentStats();
+  }
+
   /**
    * Helper to find an item in the allocated list.
    * @param item the item to find
@@ -183,17 +187,16 @@ class TestCacheComponent : public CacheComponent {
     return folly::unit;
   }
 
-  folly::coro::Task<void> release(CacheItem& item, bool inserted) override {
+  void release(CacheItem& item, bool inserted) override {
     if (inserted) {
-      CO_ASSERT_TRUE(cachedItems_.erase(item.getKey()) > 0 ||
-                     removedItems_.contains(item.getKey()));
+      ASSERT_TRUE(cachedItems_.erase(item.getKey()) > 0 ||
+                  removedItems_.contains(item.getKey()));
     } else {
       auto it = findAllocatedItem(&item);
-      CO_ASSERT_NE(it, allocatedItems_.end());
+      ASSERT_NE(it, allocatedItems_.end());
       allocatedItems_.erase(it);
     }
     delete &item;
-    co_return;
   }
 };
 

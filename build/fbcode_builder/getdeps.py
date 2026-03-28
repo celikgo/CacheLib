@@ -47,6 +47,15 @@ class UsageError(Exception):
     pass
 
 
+# Shared argument definition for --build-type used by multiple commands
+BUILD_TYPE_ARG = {
+    "help": "Set the build type explicitly: Debug (unoptimized, debug symbols), RelWithDebInfo (optimized with debug symbols, default), MinSizeRel (size-optimized, no debug), or Release (optimized, no debug).",
+    "choices": ["Debug", "Release", "RelWithDebInfo", "MinSizeRel"],
+    "action": "store",
+    "default": "RelWithDebInfo",
+}
+
+
 @cmd("validate-manifest", "parse a manifest and validate that it is correct")
 class ValidateManifest(SubCmd):
     def run(self, args):
@@ -234,7 +243,7 @@ class ProjectCmdBase(SubCmd):
         return os.path.exists(built_marker)
 
 
-class CachedProject(object):
+class CachedProject:
     """A helper that allows calling the cache logic for a project
     from both the build and the fetch code"""
 
@@ -728,6 +737,7 @@ class BuildCmd(ProjectCmdBase):
                     # cmake
                     has_built_marker = False
                     if not (m == manifest and "install" not in cmake_targets):
+                        os.makedirs(os.path.dirname(built_marker), exist_ok=True)
                         with open(built_marker, "w") as f:
                             f.write(project_hash)
                             has_built_marker = True
@@ -880,13 +890,7 @@ class BuildCmd(ProjectCmdBase):
             action="store_true",
             default=False,
         )
-        parser.add_argument(
-            "--build-type",
-            help="Set the build type explicitly.  Cmake and cargo builders act on them. Only Debug and RelWithDebInfo widely supported.",
-            choices=["Debug", "Release", "RelWithDebInfo", "MinSizeRel"],
-            action="store",
-            default=None,
-        )
+        parser.add_argument("--build-type", **BUILD_TYPE_ARG)
 
 
 @cmd("fixup-dyn-deps", "Adjusts dynamic dependencies for packaging purposes")
@@ -940,6 +944,7 @@ class TestCmd(ProjectCmdBase):
             schedule_type=args.schedule_type,
             owner=args.test_owner,
             test_filter=args.filter,
+            test_exclude=args.exclude,
             retry=args.retry,
             no_testpilot=args.no_testpilot,
             timeout=args.timeout,
@@ -948,6 +953,7 @@ class TestCmd(ProjectCmdBase):
     def setup_project_cmd_parser(self, parser):
         parser.add_argument("--test-owner", help="Owner for testpilot")
         parser.add_argument("--filter", help="Only run the tests matching the regex")
+        parser.add_argument("--exclude", help="Exclude tests matching the regex")
         parser.add_argument(
             "--retry",
             type=int,
@@ -966,13 +972,7 @@ class TestCmd(ProjectCmdBase):
             default=None,
             help="Timeout in seconds for each individual test",
         )
-        parser.add_argument(
-            "--build-type",
-            help="Set the build type explicitly.  Cmake and cargo builders act on them. Only Debug and RelWithDebInfo widely supported.",
-            choices=["Debug", "Release", "RelWithDebInfo", "MinSizeRel"],
-            action="store",
-            default=None,
-        )
+        parser.add_argument("--build-type", **BUILD_TYPE_ARG)
 
 
 @cmd(
@@ -1009,9 +1009,18 @@ class EnvCmd(ProjectCmdBase):
 class GenerateGitHubActionsCmd(ProjectCmdBase):
     RUN_ON_ALL = """ [push, pull_request]"""
 
+    WORKFLOW_DISPATCH_TMATE = """
+  workflow_dispatch:
+    inputs:
+      tmate_enabled:
+        description: 'Start a tmate SSH session on failure'
+        required: false
+        default: false
+        type: boolean"""
+
     def run_project_cmd(self, args, loader, manifest):
         platforms = [
-            HostType("linux", "ubuntu", "22"),
+            HostType("linux", "ubuntu", "24"),
             HostType("darwin", None, None),
             HostType("windows", None, None),
         ]
@@ -1023,24 +1032,35 @@ class GenerateGitHubActionsCmd(ProjectCmdBase):
 
     def get_run_on(self, args):
         if args.run_on_all_branches:
-            return self.RUN_ON_ALL
+            return (
+                """
+  push:
+  pull_request:"""
+                + self.WORKFLOW_DISPATCH_TMATE
+            )
         if args.cron:
             if args.cron == "never":
                 return " {}"
             elif args.cron == "workflow_dispatch":
-                return "\n  workflow_dispatch"
+                return self.WORKFLOW_DISPATCH_TMATE
             else:
-                return f"""
+                return (
+                    f"""
   schedule:
     - cron: '{args.cron}'"""
+                    + self.WORKFLOW_DISPATCH_TMATE
+                )
 
-        return f"""
+        return (
+            f"""
   push:
     branches:
     - {args.main_branch}
   pull_request:
     branches:
     - {args.main_branch}"""
+            + self.WORKFLOW_DISPATCH_TMATE
+        )
 
     # TODO: Break up complex function
     def write_job_for_platform(self, platform, args):  # noqa: C901
@@ -1386,6 +1406,12 @@ jobs:
                 out.write("      if: always()\n")
                 out.write("      run: df -h\n")
 
+            out.write("    - name: Setup tmate session\n")
+            out.write(
+                "      if: failure() && github.event_name == 'workflow_dispatch' && inputs.tmate_enabled\n"
+            )
+            out.write("      uses: mxschmitt/action-tmate@v3\n")
+
     def setup_project_cmd_parser(self, parser):
         parser.add_argument(
             "--disallow-system-packages",
@@ -1402,7 +1428,7 @@ jobs:
             help="Allow CI to fire on all branches - Handy for testing",
         )
         parser.add_argument(
-            "--ubuntu-version", default="22.04", help="Version of Ubuntu to use"
+            "--ubuntu-version", default="24.04", help="Version of Ubuntu to use"
         )
         parser.add_argument(
             "--cpu-cores",
@@ -1447,13 +1473,7 @@ jobs:
             action="store_true",
             default=False,
         )
-        parser.add_argument(
-            "--build-type",
-            help="Set the build type explicitly.  Cmake and cargo builders act on them. Only Debug and RelWithDebInfo widely supported.",
-            choices=["Debug", "Release", "RelWithDebInfo", "MinSizeRel"],
-            action="store",
-            default=None,
-        )
+        parser.add_argument("--build-type", **BUILD_TYPE_ARG)
         parser.add_argument(
             "--no-build-cache",
             action="store_false",
