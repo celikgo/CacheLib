@@ -365,6 +365,43 @@ CacheServiceImpl::CacheServiceImpl(std::shared_ptr<CacheManager> cacheManager)
   return ::grpc::Status::OK;
 }
 
+::grpc::Status CacheServiceImpl::Incr(
+    ::grpc::ServerContext* /*context*/,
+    const ::cachelib::grpc::IncrRequest* request,
+    ::cachelib::grpc::IncrResponse* response) {
+  if (!cacheManager_->isReady()) {
+    return ::grpc::Status(
+        ::grpc::StatusCode::UNAVAILABLE, "Cache not initialized");
+  }
+
+  if (request->key().empty()) {
+    return ::grpc::Status(
+        ::grpc::StatusCode::INVALID_ARGUMENT, "Key cannot be empty");
+  }
+
+  int64_t delta = request->delta();
+  if (delta == 0) {
+    delta = 1;
+  }
+
+  uint32_t ttlSeconds = 0;
+  if (request->ttl_seconds() > 0) {
+    ttlSeconds = static_cast<uint32_t>(request->ttl_seconds());
+  }
+
+  auto result = cacheManager_->incr(request->key(), delta, ttlSeconds);
+
+  if (!result.success) {
+    return ::grpc::Status(
+        ::grpc::StatusCode::INTERNAL,
+        result.message.empty() ? "Incr failed" : result.message);
+  }
+
+  response->set_value(result.value);
+  response->set_ttl_set(result.ttlSet);
+  return ::grpc::Status::OK;
+}
+
 ::grpc::Status CacheServiceImpl::CompareAndSwap(
     ::grpc::ServerContext* /*context*/,
     const ::cachelib::grpc::CompareAndSwapRequest* request,

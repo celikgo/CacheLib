@@ -101,6 +101,12 @@ class CacheServiceImpl final : public cachelib::grpc::CacheService::Service {
       const ::cachelib::grpc::DecrementRequest* request,
       ::cachelib::grpc::DecrementResponse* response) override;
 
+  // Incr atomically increments a counter and stamps TTL on first creation
+  ::grpc::Status Incr(
+      ::grpc::ServerContext* context,
+      const ::cachelib::grpc::IncrRequest* request,
+      ::cachelib::grpc::IncrResponse* response) override;
+
   // CompareAndSwap atomically updates a value if it matches expected
   ::grpc::Status CompareAndSwap(
       ::grpc::ServerContext* context,

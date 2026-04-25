@@ -408,6 +408,69 @@ IncrDecrResult CacheManager::decrement(std::string_view key,
   return atomicAddValue(key, -delta, ttlSeconds);
 }
 
+IncrResult CacheManager::incr(std::string_view key,
+                              int64_t delta,
+                              uint32_t ttlSeconds) {
+  IncrResult result;
+
+  if (!cache_) {
+    result.message = "Cache not initialized";
+    return result;
+  }
+
+  if (delta == 0) {
+    delta = 1;
+  }
+
+  std::lock_guard<std::mutex> lock(atomicOpMutex_);
+
+  int64_t baseValue = 0;
+  uint32_t writeTtl = ttlSeconds;
+  bool createdNew = true;
+
+  auto existingHandle = cache_->find(folly::StringPiece(key.data(), key.size()));
+  if (existingHandle) {
+    // Treat logically-expired entries as miss so the window gets re-stamped.
+    uint32_t expiryTime = existingHandle->getExpiryTime();
+    uint32_t now = static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    bool stillLive = (expiryTime == 0) || (expiryTime > now);
+
+    if (stillLive) {
+      const char* data =
+          reinterpret_cast<const char*>(existingHandle->getMemory());
+      size_t size = existingHandle->getSize();
+      std::string valueStr(data, size);
+
+      auto parseResult = std::from_chars(
+          valueStr.data(), valueStr.data() + valueStr.size(), baseValue);
+      if (parseResult.ec != std::errc()) {
+        result.message = "Value is not a valid integer";
+        return result;
+      }
+
+      // Preserve the existing TTL: the rate-limit window must not slide.
+      writeTtl = (expiryTime == 0) ? 0 : (expiryTime - now);
+      createdNew = false;
+    }
+  }
+
+  int64_t newValue = baseValue + delta;
+  std::string newValueStr = std::to_string(newValue);
+
+  if (set(key, newValueStr, writeTtl)) {
+    result.success = true;
+    result.value = newValue;
+    result.ttlSet = createdNew;
+  } else {
+    result.message = "Failed to store new value";
+  }
+
+  return result;
+}
+
 CASResult CacheManager::compareAndSwap(std::string_view key,
                                         std::string_view expectedValue,
                                         std::string_view newValue,

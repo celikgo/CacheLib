@@ -30,7 +30,7 @@ namespace cachelib {
 namespace grpc_server {
 
 // Server version
-constexpr const char* kServerVersion = "1.5.0";
+constexpr const char* kServerVersion = "1.6.0";
 
 // Configuration for the cache manager
 struct CacheConfig {
@@ -91,6 +91,16 @@ struct SetNXResult {
 struct IncrDecrResult {
   bool success = false;
   int64_t newValue = 0;
+  std::string message;
+};
+
+// Result of Incr operation (rate-limit-bucket semantics)
+struct IncrResult {
+  bool success = false;
+  int64_t value = 0;
+  // True when this call created the key and stamped the TTL; false when the
+  // key already existed and the existing TTL was left in place.
+  bool ttlSet = false;
   std::string message;
 };
 
@@ -216,6 +226,11 @@ class CacheManager {
 
   // Atomic decrement
   IncrDecrResult decrement(std::string_view key, int64_t delta, uint32_t ttlSeconds = 0);
+
+  // Atomic increment for fixed-window rate-limit buckets.
+  // On miss: creates the key with value=delta and TTL=ttlSeconds (ttlSet=true).
+  // On hit: increments by delta and preserves the existing TTL (ttlSet=false).
+  IncrResult incr(std::string_view key, int64_t delta, uint32_t ttlSeconds);
 
   // Compare and swap
   CASResult compareAndSwap(

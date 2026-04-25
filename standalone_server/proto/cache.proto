@@ -77,6 +77,13 @@ service CacheService {
   // Creates the key with value=-delta if it doesn't exist.
   rpc Decrement(DecrementRequest) returns (DecrementResponse) {}
 
+  // Incr atomically increments a counter and stamps a TTL on first creation.
+  // On miss: creates the key with value=delta and TTL=ttl_seconds (ttl_set=true).
+  // On hit: increments by delta and leaves the existing TTL untouched
+  // (ttl_set=false). Designed for fixed-window rate-limit buckets where the
+  // window must be sealed at creation and never extended by subsequent hits.
+  rpc Incr(IncrRequest) returns (IncrResponse) {}
+
   // CompareAndSwap atomically updates a value if it matches expected.
   // Useful for optimistic locking patterns.
   rpc CompareAndSwap(CompareAndSwapRequest) returns (CompareAndSwapResponse) {}
@@ -334,6 +341,29 @@ message DecrementResponse {
   int64 new_value = 2;
   // Human-readable message
   string message = 3;
+}
+
+// IncrRequest atomically increments a counter; on creation, stamps a TTL.
+//
+// Example: Incr(key="rl:user:42:tier:gold", delta=1, ttl_seconds=60)
+// Use case: Tier-aware fixed-window rate-limit buckets where the window length
+// is set once (at bucket creation) and must not slide on subsequent hits.
+message IncrRequest {
+  // Key to increment
+  string key = 1;
+  // Amount to add (must be > 0 for rate-limit semantics; server treats 0 as 1)
+  int64 delta = 2;
+  // TTL in seconds applied only when the key is newly created (0 = no expiry)
+  int64 ttl_seconds = 3;
+}
+
+// IncrResponse contains the post-increment counter value.
+message IncrResponse {
+  // Counter value after the increment was applied
+  int64 value = 1;
+  // True if this call created the key and stamped ttl_seconds; false if the
+  // key already existed and the existing TTL was preserved
+  bool ttl_set = 2;
 }
 
 // CompareAndSwapRequest atomically updates if value matches expected.
