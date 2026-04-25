@@ -1,5 +1,65 @@
 # CacheLib gRPC Server - Release Notes
 
+## v1.6.0 (2026-04-25)
+
+### New RPC: `Incr` (fixed-window rate-limit buckets)
+
+Adds a dedicated atomic counter primitive whose semantics are tuned for
+fixed-window rate limiting. Distinct from the pre-existing `Increment`
+RPC, which overrides the entry's TTL whenever a non-zero `ttl_seconds`
+is supplied.
+
+```protobuf
+rpc Incr(IncrRequest) returns (IncrResponse);
+
+message IncrRequest  { string key = 1; int64 delta = 2; int64 ttl_seconds = 3; }
+message IncrResponse { int64 value = 1; bool ttl_set = 2; }
+```
+
+Semantics:
+- **On miss**: creates the key with `value=delta` and `TTL=ttl_seconds`,
+  returns `ttl_set=true`.
+- **On hit**: increments by `delta` and **preserves the existing TTL**
+  (the rate-limit window does not slide), returns `ttl_set=false`.
+- **Logically-expired hit**: treated as miss (window re-stamped) so
+  delayed eviction does not stretch a window indefinitely.
+- `delta=0` is treated as `1`. Negative `delta` is rejected via the
+  same path as a malformed integer entry.
+- Errors: empty key → `INVALID_ARGUMENT`; cache not ready →
+  `UNAVAILABLE`; backend write failure → `INTERNAL`.
+
+The existing `Increment` / `Decrement` RPCs are unchanged and remain
+the right primitive for general counter use cases that *should*
+re-arm the TTL on every write.
+
+### Upgrade
+
+```bash
+docker pull ghcr.io/celikgo/cachelib-grpc-server:1.6.0
+```
+
+Backward-compatible. Existing clients see no behavior change. Clients
+that want to use the new RPC must regenerate gRPC stubs from the
+updated `cache.proto`.
+
+### Docker
+
+```bash
+docker pull ghcr.io/celikgo/cachelib-grpc-server:1.6.0
+
+docker run -d -p 50051:50051 -p 9090:9090 \
+  ghcr.io/celikgo/cachelib-grpc-server:1.6.0 \
+  --cache_size=2147483648
+
+docker run --rm ghcr.io/celikgo/cachelib-grpc-server:1.6.0 --version
+# cachelib-grpc-server 1.6.0
+```
+
+Both `linux/amd64` and `linux/arm64` images published to GHCR under
+the same manifest list digest.
+
+---
+
 ## v1.5.0 (2026-03-28)
 
 ### Upstream Sync

@@ -1,4 +1,4 @@
-# CacheLib gRPC Server v1.3.0
+# CacheLib gRPC Server v1.6.0
 
 A high-performance, Redis-compatible caching server powered by [CacheLib](https://github.com/facebook/CacheLib) with gRPC interface.
 
@@ -8,20 +8,20 @@ A high-performance, Redis-compatible caching server powered by [CacheLib](https:
 
 ```bash
 # Pull the latest image
-docker pull ghcr.io/celikgo/cachelib-grpc-server:1.3.0
+docker pull ghcr.io/celikgo/cachelib-grpc-server:1.6.0
 
 # Run the server (1GB RAM cache)
-docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.3.0
+docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.6.0
 
 # Run with custom cache size (4GB)
 docker run -d --name cachelib -p 50051:50051 \
-  ghcr.io/celikgo/cachelib-grpc-server:1.3.0 \
+  ghcr.io/celikgo/cachelib-grpc-server:1.6.0 \
   --cache_size=4294967296
 
 # Run with hybrid caching (DRAM + SSD)
 docker run -d --name cachelib -p 50051:50051 \
   -v /path/to/ssd:/data/nvm \
-  ghcr.io/celikgo/cachelib-grpc-server:1.3.0 \
+  ghcr.io/celikgo/cachelib-grpc-server:1.6.0 \
   --cache_size=2147483648 \
   --enable_nvm=true \
   --nvm_path=/data/nvm/cache.dat \
@@ -61,8 +61,9 @@ curl http://localhost:9090/metrics
 |---------|-------------|----------|
 | **GetTTL** | Check remaining TTL | Cache monitoring |
 | **SetNX** | Set if not exists | Distributed locks |
-| **Increment** | Atomic add | Rate limiting, counters |
-| **Decrement** | Atomic subtract | Counters |
+| **Increment** | Atomic add (re-arms TTL) | General counters |
+| **Decrement** | Atomic subtract (re-arms TTL) | General counters |
+| **Incr** *(v1.6.0+)* | Atomic add, TTL stamped only on creation | Fixed-window rate-limit buckets |
 | **Touch** | Update TTL only | Session extension |
 | **CompareAndSwap** | Conditional update | Optimistic locking |
 
@@ -122,21 +123,37 @@ grpcurl -plaintext -d '{"key":"lock:order:456"}' \
   localhost:50051 cachelib.grpc.CacheService/Delete
 ```
 
-### Rate Limiting (Increment)
+### Fixed-Window Rate Limiting (Incr, v1.6.0+)
+
+Use `Incr` when the rate-limit window must be sealed at first request
+and **not** slide on subsequent hits in the same window.
 
 ```bash
-# Increment counter (creates with value=1 if not exists)
+# First request in a 60s window: creates with value=1, TTL=60.
+# Response: {"value":"1","ttl_set":true}
 grpcurl -plaintext -d '{"key":"rate:api:user:789","delta":1,"ttl_seconds":60}' \
-  localhost:50051 cachelib.grpc.CacheService/Increment
+  localhost:50051 cachelib.grpc.CacheService/Incr
 
+# Subsequent request in the same window: increments, TTL untouched.
+# Response: {"value":"2","ttl_set":false}
+
+# Reject when value > limit. Window expires naturally after the
+# original ttl_seconds, regardless of how many hits arrive.
+```
+
+### General Counters (Increment / Decrement)
+
+`Increment` overrides the entry's TTL whenever `ttl_seconds` is set,
+so use it for counters that *should* re-arm on each write (e.g. an
+idle-timeout counter), not for fixed-window rate limits.
+
+```bash
+grpcurl -plaintext -d '{"key":"counter:visits","delta":1,"ttl_seconds":3600}' \
+  localhost:50051 cachelib.grpc.CacheService/Increment
 # Response: {"success":true,"newValue":"1"}
 
-# Decrement
-grpcurl -plaintext -d '{"key":"rate:api:user:789","delta":1}' \
+grpcurl -plaintext -d '{"key":"counter:visits","delta":1}' \
   localhost:50051 cachelib.grpc.CacheService/Decrement
-
-# Check if newValue > limit to reject request
-# Example: limit = 100 requests per minute
 ```
 
 ### Session Management (Touch)
@@ -229,7 +246,7 @@ Response:
   "deleteCount": "50",
   "evictionCount": "0",
   "uptimeSeconds": "3600",
-  "version": "1.3.0"
+  "version": "1.6.0"
 }
 ```
 
@@ -261,7 +278,7 @@ Response:
 version: '3.8'
 services:
   cachelib:
-    image: ghcr.io/celikgo/cachelib-grpc-server:1.3.0
+    image: ghcr.io/celikgo/cachelib-grpc-server:1.6.0
     ports:
       - "50051:50051"
       - "9090:9090"    # Prometheus metrics
@@ -323,10 +340,10 @@ try (CacheLibClient client = new CacheLibClient("localhost", 50051)) {
         // Lock acquired
     }
 
-    // Increment for rate limiting
-    IncrementResult counter = client.increment("rate:user:123", 1, 60);
-    if (counter.getNewValue() > 100) {
-        // Rate limit exceeded
+    // Fixed-window rate limit (v1.6.0+) — TTL stamped on first hit only
+    IncrResult counter = client.incr("rate:user:123", 1, 60);
+    if (counter.getValue() > 100) {
+        // Rate limit exceeded; window still expires at original TTL
     }
 
     // Stats
@@ -368,10 +385,10 @@ response = stub.SetNX(cache_pb2.SetNXRequest(
 if response.was_set:
     print("Lock acquired!")
 
-# Increment (rate limiting)
-response = stub.Increment(cache_pb2.IncrementRequest(
+# Fixed-window rate limit (v1.6.0+) — TTL stamped on first hit only
+response = stub.Incr(cache_pb2.IncrRequest(
     key="rate:user:123", delta=1, ttl_seconds=60))
-print(f"Counter: {response.new_value}")
+print(f"Counter: {response.value}, opened window: {response.ttl_set}")
 ```
 
 ### Go
@@ -438,9 +455,9 @@ client.Get({ key: 'mykey' }, (err, response) => {
   }
 });
 
-// Increment
-client.Increment({ key: 'counter', delta: 1, ttl_seconds: 60 }, (err, response) => {
-  console.log(`Counter: ${response.new_value}`);
+// Fixed-window rate limit (v1.6.0+) — TTL stamped on first hit only
+client.Incr({ key: 'rate:user:123', delta: 1, ttl_seconds: 60 }, (err, response) => {
+  console.log(`Counter: ${response.value}, opened window: ${response.ttl_set}`);
 });
 ```
 
@@ -451,7 +468,7 @@ CacheLib supports transparent hybrid caching where hot items stay in DRAM and wa
 ```bash
 docker run -d -p 50051:50051 \
   -v /mnt/nvme:/data/nvm \
-  ghcr.io/celikgo/cachelib-grpc-server:1.3.0 \
+  ghcr.io/celikgo/cachelib-grpc-server:1.6.0 \
   --cache_size=8589934592 \
   --enable_nvm=true \
   --nvm_path=/data/nvm/cache.dat \
@@ -514,12 +531,33 @@ docker build -t cachelib-grpc-server -f standalone_server/Dockerfile .
 | Tag | Description |
 |-----|-------------|
 | `latest` | Latest stable release |
-| `1.3.0` | Current version — reflection, Pipeline, metrics |
+| `1.6.0` | Current version — adds `Incr` for fixed-window rate limits |
+| `1.5.0` | Upstream sync (185 commits) — FixedSizeIndex, FlashCacheComponent |
+| `1.4.0` | `size_bytes` in SetResponse, enriched Scan with `KeyInfo` |
+| `1.3.0` | Reflection, Pipeline, Prometheus metrics |
 | `1.2.2` | Multi-arch support, upstream sync |
 
 **Registry:** `ghcr.io/celikgo/cachelib-grpc-server`
 
 ## Changelog
+
+### v1.6.0
+- New `Incr(IncrRequest) returns (IncrResponse)` RPC for fixed-window
+  rate-limit buckets. On miss: creates with `value=delta`,
+  `TTL=ttl_seconds`, returns `ttl_set=true`. On hit: increments and
+  preserves the existing TTL, returns `ttl_set=false`. Logically-
+  expired hits are treated as miss so eviction lag does not stretch
+  a window. Distinct from the existing `Increment` RPC, whose TTL is
+  re-armed by every request.
+
+### v1.5.0
+- Upstream sync (185 commits): FixedSizeIndex, access-time tracking,
+  FlashCacheComponent, mutex starvation fix, data corruption fix
+- Docker: magic_enum via cmake `find_package`
+
+### v1.4.0
+- `size_bytes` in SetResponse
+- Enriched Scan: `include_details` flag with per-key `KeyInfo`
 
 ### v1.3.0
 - gRPC server reflection (service discovery without proto files)
@@ -567,7 +605,7 @@ docker build -t cachelib-grpc-server -f standalone_server/Dockerfile .
 Increase log verbosity for debugging:
 
 ```bash
-docker run -d -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.3.0 --log_level=DBG
+docker run -d -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.6.0 --log_level=DBG
 ```
 
 ## License

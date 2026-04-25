@@ -1,5 +1,58 @@
 # CacheLib gRPC Server - Update Notes
 
+## Updating to v1.6.0
+
+### What Changed
+Adds a dedicated `Incr` RPC for fixed-window rate-limit buckets.
+Atomic increment with create-and-stamp-TTL on miss, no-TTL-extend on
+hit. See `RELEASE_NOTES.md` for the full contract.
+
+### Migration Steps
+
+#### 1. Pull the new image
+```bash
+docker pull ghcr.io/celikgo/cachelib-grpc-server:1.6.0
+```
+
+#### 2. Update your Docker Compose / deployment
+```yaml
+services:
+  cachelib:
+    image: ghcr.io/celikgo/cachelib-grpc-server:1.6.0  # was :1.5.0
+    ports:
+      - "50051:50051"
+      - "9090:9090"
+    command:
+      - "--address=0.0.0.0"
+      - "--port=50051"
+      - "--cache_size=1073741824"
+    restart: unless-stopped
+```
+
+#### 3. Restart the service
+```bash
+docker compose pull
+docker compose up -d
+```
+
+#### 4. (Optional) Regenerate client stubs
+Only needed if you want to call the new RPC. Existing stubs continue
+to work for every other operation.
+
+### Breaking Changes
+None. The new RPC is additive; the existing `Increment` / `Decrement`
+RPCs and every other operation are unchanged.
+
+### Notes
+- `Incr` and `Increment` coexist. Use `Incr` for rate-limit buckets
+  where the window must be sealed at creation; use `Increment` for
+  general counters where re-arming the TTL on each write is fine.
+- Clients that have not yet regenerated stubs will get
+  `UNIMPLEMENTED` from `Incr`. Wire up a fail-open path with a
+  tagged counter so the gap is observable.
+
+---
+
 ## Updating to v1.2.2
 
 ### What Changed
@@ -94,6 +147,9 @@ protoc --go_out=. --go-grpc_out=. cache.proto
 - `GetTTL`, `Touch`
 - `MultiGet`, `MultiSet`
 - `Scan`, `Flush`
+
+> A dedicated `Incr` RPC with fixed-window rate-limit semantics was
+> added later in v1.6.0 — see the v1.6.0 section above.
 
 ---
 

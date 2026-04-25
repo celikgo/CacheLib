@@ -2,7 +2,7 @@
 
 A high-performance caching server from Meta/Facebook, available as a Docker container. Use it as an alternative to Redis with superior performance and hybrid DRAM+SSD caching capabilities.
 
-**Version:** 1.5.0
+**Version:** 1.6.0
 
 **Architectures:** `linux/amd64` (x86_64), `linux/arm64` (Apple Silicon, AWS Graviton)
 
@@ -11,13 +11,13 @@ A high-performance caching server from Meta/Facebook, available as a Docker cont
 ### Pull and Run
 
 ```bash
-docker pull ghcr.io/celikgo/cachelib-grpc-server:1.5.0
+docker pull ghcr.io/celikgo/cachelib-grpc-server:1.6.0
 
 # Run with 1 GB cache (default)
-docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.5.0
+docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.6.0
 
 # Run with custom cache size (2 GB)
-docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.5.0 \
+docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-server:1.6.0 \
   --address=0.0.0.0 --port=50051 --cache_size=2147483648
 ```
 
@@ -26,7 +26,7 @@ docker run -d --name cachelib -p 50051:50051 ghcr.io/celikgo/cachelib-grpc-serve
 ```yaml
 services:
   cachelib:
-    image: ghcr.io/celikgo/cachelib-grpc-server:1.5.0
+    image: ghcr.io/celikgo/cachelib-grpc-server:1.6.0
     ports:
       - "50051:50051"
       - "9090:9090"    # Prometheus metrics
@@ -61,7 +61,7 @@ For larger datasets, enable NVM (SSD) caching:
 ```yaml
 services:
   cachelib:
-    image: ghcr.io/celikgo/cachelib-grpc-server:1.5.0
+    image: ghcr.io/celikgo/cachelib-grpc-server:1.6.0
     ports:
       - "50051:50051"
       - "9090:9090"
@@ -109,9 +109,16 @@ volumes:
 | Operation | Description | Redis Equivalent |
 |-----------|-------------|------------------|
 | `SetNX` | Set if not exists | `SETNX` |
-| `Increment` | Atomic increment | `INCR` / `INCRBY` |
-| `Decrement` | Atomic decrement | `DECR` / `DECRBY` |
+| `Increment` | Atomic increment (TTL re-armed by request) | `INCR` / `INCRBY` |
+| `Decrement` | Atomic decrement (TTL re-armed by request) | `DECR` / `DECRBY` |
+| `Incr` *(v1.6.0+)* | Atomic increment, TTL stamped on creation only — fixed-window rate-limit buckets | `INCR` + first-write `EXPIRE` |
 | `CompareAndSwap` | Atomic CAS | (Lua script) |
+
+> `Incr` vs `Increment`: `Increment` overrides the entry's TTL when
+> `ttl_seconds` is supplied on every call (so the window slides on
+> each hit). `Incr` only stamps the TTL on the call that *creates*
+> the entry; subsequent hits leave the existing TTL untouched. The
+> response field `ttl_set` tells you which path ran.
 
 ### TTL Operations
 
@@ -154,6 +161,7 @@ service CacheService {
   rpc SetNX(SetNXRequest) returns (SetNXResponse);
   rpc Increment(IncrementRequest) returns (IncrementResponse);
   rpc Decrement(DecrementRequest) returns (DecrementResponse);
+  rpc Incr(IncrRequest) returns (IncrResponse);  // v1.6.0+
   rpc CompareAndSwap(CompareAndSwapRequest) returns (CompareAndSwapResponse);
 
   // TTL Operations
@@ -222,6 +230,12 @@ message IncrementResponse { bool success = 1; int64 new_value = 2; string messag
 
 message DecrementRequest { string key = 1; int64 delta = 2; int64 ttl_seconds = 3; }
 message DecrementResponse { bool success = 1; int64 new_value = 2; string message = 3; }
+
+// Incr (v1.6.0+) — atomic counter for fixed-window rate-limit buckets.
+// On miss: creates with value=delta, TTL=ttl_seconds, returns ttl_set=true.
+// On hit: increments by delta, leaves TTL untouched, returns ttl_set=false.
+message IncrRequest { string key = 1; int64 delta = 2; int64 ttl_seconds = 3; }
+message IncrResponse { int64 value = 1; bool ttl_set = 2; }
 
 message CompareAndSwapRequest {
   string key = 1;
@@ -323,10 +337,9 @@ if response.found:
     print(response.value.decode())
     print(f"TTL: {response.ttl_remaining}s")
 
-# Atomic Increment (rate limiting example)
-response = cache.Increment(IncrementRequest(key="ratelimit:user:1", delta=1, ttl_seconds=60))
-if response.success:
-    print(f"Request count: {response.new_value}")
+# Fixed-window rate limit (v1.6.0+) — Incr stamps TTL only on first hit
+response = cache.Incr(IncrRequest(key="ratelimit:user:1", delta=1, ttl_seconds=60))
+print(f"Request count: {response.value} (opened window: {response.ttl_set})")
 
 # SetNX (distributed lock example)
 response = cache.SetNX(SetNXRequest(key="lock:resource", value=b"owner-1", ttl_seconds=30))
@@ -499,14 +512,20 @@ client.Stats({}, (err, resp) => {
 
 ## Use Cases
 
-### Rate Limiting
+### Rate Limiting (fixed window)
 
 ```python
 def check_rate_limit(user_id, limit=100, window=60):
+    """Fixed-window rate limit. Uses Incr (v1.6.0+) so the window is
+    sealed at the first request and not extended by later ones."""
     key = f"ratelimit:{user_id}"
-    resp = cache.Increment(IncrementRequest(key=key, delta=1, ttl_seconds=window))
-    return resp.new_value <= limit
+    resp = cache.Incr(IncrRequest(key=key, delta=1, ttl_seconds=window))
+    # resp.ttl_set is True on the call that opened the window.
+    return resp.value <= limit
 ```
+
+> If you need a counter that *should* re-arm its TTL on every write
+> (e.g. an idle-timeout counter), use the older `Increment` RPC instead.
 
 ### Distributed Lock
 
@@ -575,20 +594,24 @@ docker buildx inspect --bootstrap
 # Build and push for both architectures
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/celikgo/cachelib-grpc-server:1.5.0 \
+  -t ghcr.io/celikgo/cachelib-grpc-server:1.6.0 \
   -t ghcr.io/celikgo/cachelib-grpc-server:latest \
   -f standalone_server/Dockerfile \
   --push \
   .
 ```
 
-> **Note:** Cross-architecture builds use QEMU emulation and can take 30-60+ minutes. Building on a native machine or using CI is faster.
+> **Note:** Cross-architecture builds use QEMU emulation. The
+> emulated platform's full from-source dep build (gRPC, folly,
+> fbthrift, fizz, wangle, mvfst, …) can take many hours on a laptop
+> — measured at ~11.5 h end-to-end on an Apple Silicon Mac with the
+> amd64 leg under QEMU. Native CI runners are dramatically faster.
 
 ### Native Build (single platform)
 
 ```bash
-docker build -t ghcr.io/celikgo/cachelib-grpc-server:1.5.0 -f standalone_server/Dockerfile .
-docker push ghcr.io/celikgo/cachelib-grpc-server:1.5.0
+docker build -t ghcr.io/celikgo/cachelib-grpc-server:1.6.0 -f standalone_server/Dockerfile .
+docker push ghcr.io/celikgo/cachelib-grpc-server:1.6.0
 ```
 
 ### CI/CD (GitHub Actions)
@@ -596,8 +619,8 @@ docker push ghcr.io/celikgo/cachelib-grpc-server:1.5.0
 The repository includes a GitHub Actions workflow (`.github/workflows/docker-publish.yml`) that automatically builds and pushes multi-platform images when a version tag is pushed:
 
 ```bash
-git tag v1.5.0
-git push origin v1.5.0
+git tag v1.6.0
+git push origin v1.6.0
 ```
 
 This triggers a build for both `linux/amd64` and `linux/arm64`, pushing to GHCR with the version tag and `latest`.
@@ -605,6 +628,14 @@ This triggers a build for both `linux/amd64` and `linux/arm64`, pushing to GHCR 
 You can also trigger a build manually via the GitHub Actions "Run workflow" button.
 
 ## Changelog
+
+### v1.6.0
+- New `Incr(IncrRequest) returns (IncrResponse)` RPC for fixed-window
+  rate-limit buckets — atomic increment that stamps a TTL only on
+  first creation and never extends it on subsequent hits. Distinct
+  from `Increment`, which re-arms the TTL whenever `ttl_seconds` is
+  supplied. Logically-expired hits are treated as miss so eviction
+  lag does not stretch a window.
 
 ### v1.5.0
 - Synced with upstream facebook/CacheLib (185 commits)
@@ -685,8 +716,8 @@ nc -zv localhost 50051
 If you see `exec format error` or the container crash-loops, you're running an image built for a different architecture. Pull the correct multi-arch image:
 
 ```bash
-docker pull --platform linux/amd64 ghcr.io/celikgo/cachelib-grpc-server:1.5.0  # for x86_64 servers
-docker pull --platform linux/arm64 ghcr.io/celikgo/cachelib-grpc-server:1.5.0  # for ARM servers
+docker pull --platform linux/amd64 ghcr.io/celikgo/cachelib-grpc-server:1.6.0  # for x86_64 servers
+docker pull --platform linux/arm64 ghcr.io/celikgo/cachelib-grpc-server:1.6.0  # for ARM servers
 ```
 
 ## Links
